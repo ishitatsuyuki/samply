@@ -22,7 +22,11 @@ use linux_perf_event_reader::{
     MmapRecord, RawDataU64, SampleRecord,
 };
 use memmap2::Mmap;
-use object::{CompressedFileRange, CompressionFormat, Object, ObjectSection};
+use object::pe::{ImageNtHeaders32, ImageNtHeaders64};
+use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile};
+use object::{
+    CompressedFileRange, CompressionFormat, FileKind, Object, ObjectSection, ObjectSegment,
+};
 use samply_symbols::{debug_id_for_object, DebugIdExt};
 use serde_json::json;
 use wholesym::samply_symbols::demangle_any;
@@ -1538,54 +1542,53 @@ where
     ) -> ExplicitModuleSectionInfo<MmapRangeOrVec> {
         let mmap = mmap_arc.as_ref();
 
-        fn section_data<'a>(
-            section: &impl ObjectSection<'a>,
-            mmap: Option<&Arc<Mmap>>,
-        ) -> Option<MmapRangeOrVec> {
-            let CompressedFileRange {
-                format,
-                offset,
-                compressed_size: _,
-                uncompressed_size,
-            } = section.compressed_file_range().ok()?;
-            match (format, mmap) {
-                (CompressionFormat::None, Some(mmap)) => {
-                    MmapRangeOrVec::new_mmap_range(mmap.clone(), offset, uncompressed_size)
-                }
-                _ => Some(MmapRangeOrVec::Vec(Arc::new(
-                    section.uncompressed_data().ok()?.to_vec(),
-                ))),
-            }
-        }
-
-        let base_svma = samply_symbols::relative_address_base(file);
-        let text = file.section_by_name(".text");
-        let eh_frame = file.section_by_name(".eh_frame");
-        let got = file.section_by_name(".got");
-        let eh_frame_hdr = file.section_by_name(".eh_frame_hdr");
-
-        let eh_frame_data = eh_frame.as_ref().and_then(|s| section_data(s, mmap));
-        let eh_frame_hdr_data = eh_frame_hdr.as_ref().and_then(|s| section_data(s, mmap));
-        let text_data = text.as_ref().and_then(|s| section_data(s, mmap));
         fn svma_range<'a>(section: &impl ObjectSection<'a>) -> Range<u64> {
             section.address()..section.address() + section.size()
         }
+        
+        fn section_data_and_range<'data, R: object::ReadRef<'data>>(
+            file: &object::File<'data, R>,
+            mmap: Option<&Arc<Mmap>>,
+            section_name: &str,
+        ) -> Option<(MmapRangeOrVec, Range<u64>)> {
+            let mmap = mmap?;
+            let section = file.section_by_name(section_name)?;
+            let (file_start, file_size) = section.file_range()?;
+            let range = svma_range(&section);
+            Some((MmapRangeOrVec::new_mmap_range(mmap.clone(), file_start, file_size)?, range))
+        }
+
+
+        let base_svma = samply_symbols::relative_address_base(file);
+        let got = file.section_by_name(".got");
+
+        let (eh_frame, eh_frame_svma) = section_data_and_range(file, mmap, ".eh_frame").unzip();
+        let (eh_frame_hdr, eh_frame_hdr_svma) = section_data_and_range(file, mmap, ".eh_frame_hdr").unzip();
+        let (text, text_svma) = section_data_and_range(file, mmap, ".text").unzip();
+        let (pdata, _) = section_data_and_range(file, mmap, ".pdata").unzip();
+        let (rdata, rdata_svma) = section_data_and_range(file, mmap, ".rdata").unzip();
+        let (xdata, xdata_svma) = section_data_and_range(file, mmap, ".xdata").unzip();
 
         ExplicitModuleSectionInfo {
             base_svma,
-            text_svma: text.as_ref().map(svma_range),
-            text: text_data,
+            text_svma,
+            text,
             stubs_svma: None,
             stub_helper_svma: None,
             got_svma: got.as_ref().map(svma_range),
             unwind_info: None,
-            eh_frame_svma: eh_frame.as_ref().map(svma_range),
-            eh_frame: eh_frame_data,
-            eh_frame_hdr_svma: eh_frame_hdr.as_ref().map(svma_range),
-            eh_frame_hdr: eh_frame_hdr_data,
+            eh_frame_svma,
+            eh_frame,
+            eh_frame_hdr_svma,
+            eh_frame_hdr,
             debug_frame: None,
             text_segment_svma: None,
             text_segment: None,
+            pdata,
+            rdata_svma,
+            rdata,
+            xdata_svma,
+            xdata,
         }
     }
 

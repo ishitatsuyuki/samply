@@ -36,3 +36,6 @@ precise-builds = true
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[patch.crates-io]
+framehop = { path = "../framehop" }
