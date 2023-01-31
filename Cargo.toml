@@ -11,3 +11,6 @@ members = [
 ]
 resolver = "2"
 default-members = ["samply"]
+
+[patch.crates-io]
+framehop = { path = "../framehop" }
