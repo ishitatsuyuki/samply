@@ -14,9 +14,9 @@ use linux_perf_event_reader::{
 };
 use memmap2::Mmap;
 use object::pe::{ImageNtHeaders32, ImageNtHeaders64};
-use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile};
+use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile, PeFile64};
 use object::{
-    CompressedFileRange, CompressionFormat, FileKind, Object, ObjectSection, ObjectSegment,
+    BinaryFormat, CompressedFileRange, CompressionFormat, FileKind, Object, ObjectSection, ObjectSegment,
 };
 use samply_symbols::{debug_id_for_object, DebugIdExt};
 use wholesym::samply_symbols;
@@ -46,6 +46,7 @@ use crate::shared::unresolved_samples::{
     UnresolvedSamples, UnresolvedStackHandle, UnresolvedStacks,
 };
 use crate::shared::utils::open_file_with_fallback;
+use crate::linux_shared::mmap_range_or_vec::MmapRvaMapper;
 
 pub type BoxedProductNameGenerator = Box<dyn FnOnce(&str) -> String>;
 
@@ -1050,20 +1051,58 @@ where
             let eh_frame = file.section_by_name(".eh_frame");
             let got = file.section_by_name(".got");
             let eh_frame_hdr = file.section_by_name(".eh_frame_hdr");
+            let debug_frame = file.section_by_name(".debug_frame");
 
-            let unwind_data = match (
-                eh_frame
-                    .as_ref()
-                    .and_then(|s| section_data(s, mmap.clone())),
-                eh_frame_hdr
-                    .as_ref()
-                    .and_then(|s| section_data(s, mmap.clone())),
-            ) {
-                (Some(eh_frame), Some(eh_frame_hdr)) => {
-                    ModuleUnwindData::EhFrameHdrAndEhFrame(eh_frame_hdr, eh_frame)
+            let unwind_data = if file.format() == BinaryFormat::Pe && file.is_64() {
+                let file = PeFile64::parse(&mmap[..]).unwrap();
+                let section = file.section_table();
+                let exception = match file.data_directory(3) {
+                    Some(exception) => exception,
+                    None => {
+                        eprintln!("File {path} does not contain an exception table");
+                        return;
+                    }
+                };
+                let (exception_offset, _) = match
+                section.pe_file_range_at(exception.virtual_address.get(object::LittleEndian)) {
+                    Some(range) => range,
+                    None => {
+                        eprintln!("File {path}'s exception table is out of bounds");
+                        return;
+                    }
+                };
+                let exception = match MmapRangeOrVec::new_mmap_range(
+                    mmap.clone(),
+                    exception_offset as u64,
+                    exception.size.get(object::LittleEndian) as u64,
+                ) {
+                    Some(exception) => exception,
+                    None => {
+                        eprintln!("File {path}'s exception table is out of bounds");
+                        return;
+                    }
+                };
+                ModuleUnwindData::SehUnwindInfo(
+                    exception,
+                    Box::new(MmapRvaMapper::new(mmap.clone())),
+                )
+            } else if let Some(debug_frame) = debug_frame.as_ref().and_then(|s| section_data(s, mmap.clone())) {
+                ModuleUnwindData::DebugFrame(debug_frame)
+            } else {
+                match (
+                    eh_frame
+                        .as_ref()
+                        .and_then(|s| section_data(s, mmap.clone())),
+                    eh_frame_hdr
+                        .as_ref()
+                        .and_then(|s| section_data(s, mmap.clone())),
+                ) {
+                    (Some(eh_frame), Some(eh_frame_hdr)) => {
+                        ModuleUnwindData::EhFrameHdrAndEhFrame(eh_frame_hdr, eh_frame)
+                    }
+                    (Some(eh_frame), None) => ModuleUnwindData::EhFrame(eh_frame),
+                    (None, _) => ModuleUnwindData::None,
                 }
-                (Some(eh_frame), None) => ModuleUnwindData::EhFrame(eh_frame),
-                (None, _) => ModuleUnwindData::None,
             };
 
             let text_data = if let Some(text_segment) = file

@@ -10,3 +10,6 @@ members = [
     "tools/query_api"
 ]
 default-members = ["samply"]
+
+[patch.crates-io]
+framehop = { path = "../framehop" }

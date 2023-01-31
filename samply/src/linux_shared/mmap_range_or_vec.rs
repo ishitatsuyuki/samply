@@ -1,7 +1,9 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
+use framehop::RvaMapper;
 use memmap2::Mmap;
+use object::read::pe::PeFile64;
 
 #[derive(Clone)]
 pub enum MmapRangeOrVec {
@@ -30,5 +32,23 @@ impl Deref for MmapRangeOrVec {
             MmapRangeOrVec::MmapRange(mmap, (start, size)) => &mmap[*start..][..*size],
             MmapRangeOrVec::Vec(vec) => &vec[..],
         }
+    }
+}
+
+pub struct MmapRvaMapper {
+    mmap: Arc<Mmap>,
+}
+
+impl MmapRvaMapper {
+    pub fn new(mmap: Arc<Mmap>) -> Self {
+        Self { mmap }
+    }
+}
+
+impl RvaMapper for MmapRvaMapper {
+    fn map(&self, rva: u32) -> Option<&[u8]> {
+        let file = PeFile64::parse(&self.mmap[..]).unwrap();
+        let section = file.section_table();
+        section.pe_data_at(&self.mmap[..], rva)
     }
 }
