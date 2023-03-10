@@ -62,7 +62,7 @@ impl ContextSwitchHandler {
                 // The thread was running and is now context-switched out.
                 // Accumulate the running time since we last saw it. This delta will be picked
                 // up by the next sample we emit.
-                let on_duration = timestamp - last_observed_on_timestamp;
+                let on_duration = ts_sub(timestamp, *last_observed_on_timestamp);
                 thread.on_cpu_duration_since_last_sample += on_duration;
 
                 thread.state = ThreadState::Off {
@@ -97,7 +97,7 @@ impl ContextSwitchHandler {
                 // This is quite normal. Thread switching is done by some kernel code which
                 // executes on the CPU, and this CPU work can get sampled before the CPU gets
                 // to the code that emits the Switch-In record.
-                let on_duration = timestamp - last_observed_on_timestamp;
+                let on_duration = ts_sub(timestamp, last_observed_on_timestamp);
                 thread.on_cpu_duration_since_last_sample += on_duration;
 
                 None
@@ -107,7 +107,7 @@ impl ContextSwitchHandler {
             } => {
                 // The thread was sleeping and is now starting to run again.
                 // Accumulate the off-cpu time.
-                let off_duration = timestamp - off_switch_timestamp;
+                let off_duration = ts_sub(timestamp, off_switch_timestamp);
                 thread.off_cpu_duration_since_last_off_cpu_sample += off_duration;
 
                 // We just added some off-cpu time. If the accumulated off-cpu time exceeds the
@@ -144,7 +144,7 @@ impl ContextSwitchHandler {
             } => {
                 // The last time we heard from this thread, it was already running.
                 // Accumulate the running time.
-                let on_duration = timestamp - last_observed_on_timestamp;
+                let on_duration = ts_sub(timestamp, last_observed_on_timestamp);
                 thread.on_cpu_duration_since_last_sample += on_duration;
 
                 None
@@ -155,7 +155,7 @@ impl ContextSwitchHandler {
                 // The last time we heard from this thread, it was being context switched away from.
                 // We are processing a sample on it so we know it is running again. Treat this sample
                 // as a switch-in event.
-                let off_duration = timestamp - off_switch_timestamp;
+                let off_duration = ts_sub(timestamp, off_switch_timestamp);
                 thread.off_cpu_duration_since_last_off_cpu_sample += off_duration;
 
                 // We just added some off-cpu time. If the accumulated off-cpu time exceeds the
@@ -246,6 +246,13 @@ enum ThreadState {
     On {
         last_observed_on_timestamp: u64,
     },
+}
+
+fn ts_sub(a: u64, b: u64) -> u64 {
+    a.checked_sub(b).unwrap_or_else(|| {
+        // eprintln!("Timestamp subtraction overflow: a={a}, b={b}. Returning 0.");
+        0
+    })
 }
 
 #[cfg(test)]
