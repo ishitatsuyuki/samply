@@ -337,6 +337,9 @@ impl PerfBuilder {
 
         if exclude_kernel {
             attr.flags |= PERF_ATTR_FLAG_EXCLUDE_KERNEL;
+        } else {
+            attr.sample_type |= PERF_SAMPLE_CALLCHAIN;
+            attr.flags |= PERF_ATTR_FLAG_EXCLUDE_CALLCHAIN_USER;
         }
 
         if inherit {
