@@ -450,6 +450,8 @@ fn init_profiler(
         }
     };
 
+    converter.register_running_kernel_lib();
+
     // TODO: Gather threads / processes recursively, here and in PerfGroup setup.
     for entry in std::fs::read_dir(format!("/proc/{pid}/task"))
         .unwrap()

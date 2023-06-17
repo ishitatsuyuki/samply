@@ -244,6 +244,32 @@ where
         profile
     }
 
+    pub fn register_running_kernel_lib(&mut self) {
+        if let Some(kernel_symbols) = &self.kernel_symbols {
+            let debug_path = match self.linux_version.as_deref() {
+                Some(linux_version) => {
+                    // Take a guess at the vmlinux debug file path.
+                    format!("/usr/lib/debug/boot/vmlinux-{linux_version}")
+                }
+                _ => "".to_string(),
+            };
+            let build_id = kernel_symbols.build_id.clone();
+            let debug_id = DebugId::from_identifier(&build_id, self.endian == Endianness::LittleEndian);
+            let lib = LibraryInfo {
+                name: "[kernel.kallsyms]".to_string(),
+                debug_name: "".to_string(),
+                path: "[kernel.kallsyms]".to_string(),
+                debug_path,
+                debug_id,
+                code_id: Some(CodeId::ElfBuildId(ElfBuildId::from_bytes(&build_id)).to_string()),
+                arch: None,
+                symbol_table: Some(kernel_symbols.symbol_table.clone()),
+            };
+            let lib_handle = self.profile.add_lib(lib);
+            self.profile.add_kernel_lib_mapping(lib_handle, kernel_symbols.base_avma, u64::MAX, 0);
+        }
+    }
+
     pub fn handle_main_event_sample<C: ConvertRegs<UnwindRegs = U::UnwindRegs>>(
         &mut self,
         e: &SampleRecord,
