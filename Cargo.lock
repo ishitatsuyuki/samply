@@ -406,7 +406,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
- "memmap2",
+ "memmap2 0.5.8",
  "samply-symbols",
 ]
 
@@ -521,6 +521,8 @@ dependencies = [
  "gimli",
  "goblin",
  "macho-unwind-info",
+ "memmap2 0.7.1",
+ "object",
  "thiserror",
  "zerocopy",
 ]
@@ -1016,6 +1018,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memmap2"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49388d20533534cd19360ad3d6a7dadc885944aa802ba3995040c5ec11288c6"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "memoffset"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1284,7 +1295,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
- "memmap2",
+ "memmap2 0.5.8",
  "samply-api",
  "serde_json",
 ]
@@ -1515,7 +1526,7 @@ dependencies = [
  "linux-perf-data",
  "mach",
  "memchr",
- "memmap2",
+ "memmap2 0.5.8",
  "mio",
  "nix",
  "nix-base32",
@@ -1547,7 +1558,7 @@ dependencies = [
  "anyhow",
  "assert-json-diff",
  "futures",
- "memmap2",
+ "memmap2 0.5.8",
  "samply-symbols",
  "serde",
  "serde_json",
@@ -1577,7 +1588,7 @@ dependencies = [
  "lzma-rs",
  "macho-unwind-info",
  "memchr",
- "memmap2",
+ "memmap2 0.5.8",
  "msvc-demangler",
  "nom",
  "object",
@@ -1778,7 +1789,7 @@ dependencies = [
  "bytes",
  "cab",
  "dirs 4.0.0",
- "memmap2",
+ "memmap2 0.5.8",
  "reqwest",
  "thiserror",
  "tokio",
