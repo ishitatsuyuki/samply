@@ -10,6 +10,7 @@ use byteorder::LittleEndian;
 use linux_perf_data::linux_perf_event_reader::get_record_timestamp;
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
+use crate::linux::perf_event::PerfEvent;
 
 use super::perf_event::{EventRef, EventSource, Perf};
 use super::sorter::EventSorter;
@@ -67,6 +68,7 @@ impl DerefMut for Member {
 pub struct PerfGroup {
     event_sorter: EventSorter<RawFd, u64, EventRef>,
     members: BTreeMap<RawFd, Member>,
+    redirected_members: Vec<PerfEvent>,
     poll: Poll,
     poll_events: Events,
     frequency: u32,
@@ -103,6 +105,7 @@ impl PerfGroup {
         PerfGroup {
             event_sorter: EventSorter::new(),
             members: Default::default(),
+            redirected_members: Vec::new(),
             poll: Poll::new().unwrap(),
             poll_events: Events::with_capacity(16),
             frequency,
@@ -131,6 +134,7 @@ impl PerfGroup {
             self.stopped_processes.push(StoppedProcess::new(pid)?);
         }
         let mut perf_events = Vec::new();
+        let mut perf_events_no_mmap = Vec::new();
         let threads = get_threads(pid)?;
 
         let cpu_count = num_cpus::get();
@@ -174,6 +178,9 @@ impl PerfGroup {
             }
         } else {
             for cpu in 0..cpu_count as u32 {
+                let (main_perf_cpu, main_perf) = &perf_events[cpu as usize];
+                assert!(main_perf_cpu == &Some(cpu));
+
                 for &tid in &threads {
                     let mut builder = Perf::build()
                         .pid(tid)
@@ -188,9 +195,10 @@ impl PerfGroup {
                     if attach_mode == AttachMode::AttachWithEnableOnExec {
                         builder = builder.enable_on_exec();
                     }
-                    let perf = builder.open()?;
+                    let mut perf = builder.open_no_mmap()?;
+                    perf.redirect(main_perf);
 
-                    perf_events.push((Some(cpu), perf));
+                    perf_events_no_mmap.push(perf);
                 }
             }
         }
@@ -204,6 +212,7 @@ impl PerfGroup {
                 Interest::READABLE,
             )?;
         }
+        self.redirected_members.extend(perf_events_no_mmap);
 
         Ok(())
     }
@@ -214,6 +223,9 @@ impl PerfGroup {
 
     pub fn enable(&mut self) {
         for perf in self.members.values_mut() {
+            perf.enable();
+        }
+        for perf in &mut self.redirected_members {
             perf.enable();
         }
 

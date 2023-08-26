@@ -264,6 +264,7 @@ macro_rules! io {
 
 pub const PERF_EVENT_IOC_ENABLE: c_ulong = io!(b'$', 0);
 pub const PERF_EVENT_IOC_DISABLE: c_ulong = io!(b'$', 1);
+pub const PERF_EVENT_IOC_SET_OUTPUT: c_ulong = io!(b'$', 5);
 
 #[repr(C)]
 pub struct PerfEventAttr {
