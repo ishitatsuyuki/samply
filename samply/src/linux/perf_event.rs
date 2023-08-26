@@ -164,7 +164,6 @@ pub struct PerfBuilder {
     reg_mask: u64,
     event_source: EventSource,
     inherit: bool,
-    start_disabled: bool,
     enable_on_exec: bool,
     exclude_kernel: bool,
     gather_context_switches: bool,
@@ -217,11 +216,6 @@ impl PerfBuilder {
         self
     }
 
-    pub fn start_disabled(mut self) -> Self {
-        self.start_disabled = true;
-        self
-    }
-
     pub fn enable_on_exec(mut self) -> Self {
         self.enable_on_exec = true;
         self
@@ -240,20 +234,18 @@ impl PerfBuilder {
         let reg_mask = self.reg_mask;
         let event_source = self.event_source;
         let inherit = self.inherit;
-        let start_disabled = self.start_disabled;
         let exclude_kernel = self.exclude_kernel;
         let gather_context_switches = self.gather_context_switches;
 
         // debug!(
-        //     "Opening perf events; pid={}, cpu={}, frequency={}, stack_size={}, reg_mask=0x{:016X}, event_source={:?}, inherit={}, start_disabled={}...",
+        //     "Opening perf events; pid={}, cpu={}, frequency={}, stack_size={}, reg_mask=0x{:016X}, event_source={:?}, inherit={}...",
         //     pid,
         //     cpu,
         //     frequency,
         //     stack_size,
         //     reg_mask,
         //     event_source,
-        //     inherit,
-        //     start_disabled
+        //     inherit
         // );
 
         let max_sample_rate = Perf::max_sample_rate();
@@ -409,7 +401,7 @@ impl PerfBuilder {
         let parse_info = RecordParseInfo::new(&attr2, Endianness::NATIVE);
 
         // debug!("Perf events open with fd={}", fd);
-        let mut perf = Perf {
+        let perf = Perf {
             event_ref_state: Rc::new(RefCell::new(EventRefState::new(buffer, size))),
             buffer,
             size,
@@ -417,11 +409,6 @@ impl PerfBuilder {
             position: 0,
             parse_info,
         };
-
-        if !start_disabled {
-            perf.enable();
-        }
-
         Ok(perf)
     }
 }
@@ -441,7 +428,6 @@ impl Perf {
             reg_mask: 0,
             event_source: EventSource::SwCpuClock,
             inherit: false,
-            start_disabled: false,
             enable_on_exec: false,
             exclude_kernel: true,
             gather_context_switches: false,
