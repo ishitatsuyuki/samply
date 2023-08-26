@@ -132,6 +132,12 @@ impl PerfEvent {
 
         assert!(result != -1);
     }
+
+    pub fn redirect(&mut self, perf: &Perf) {
+        let result = unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_SET_OUTPUT as _, perf.as_raw_fd()) };
+
+        assert!(result != -1);
+    }
 }
 
 #[derive(Debug)]
@@ -385,7 +391,6 @@ impl PerfBuilder {
         Ok(attr)
     }
 
-    #[allow(dead_code)]
     pub fn open_no_mmap(self) -> io::Result<PerfEvent> {
         let pid = self.pid;
         let cpu = self.cpu.map(|cpu| cpu as i32).unwrap_or(-1);
