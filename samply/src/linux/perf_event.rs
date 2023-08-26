@@ -6,6 +6,7 @@ use std::os::unix::io::RawFd;
 use std::rc::Rc;
 use std::sync::atomic::{fence, Ordering};
 use std::{cmp, fmt, io, mem, ptr, slice};
+use std::os::fd::AsRawFd;
 
 use libc::{self, c_void, pid_t};
 use linux_perf_data::linux_perf_event_reader;
@@ -79,20 +80,74 @@ unsafe fn write_tail(pointer: *mut u8, value: u64) {
 }
 
 #[derive(Debug)]
-pub struct Perf {
-    event_ref_state: Rc<RefCell<EventRefState>>,
-    buffer: *mut u8,
-    size: u64,
+pub struct PerfEvent {
     fd: RawFd,
-    position: u64,
-    parse_info: RecordParseInfo,
 }
 
-impl Drop for Perf {
+impl AsRawFd for PerfEvent {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd
+    }
+}
+
+impl Drop for PerfEvent {
     fn drop(&mut self) {
         unsafe {
             libc::close(self.fd);
         }
+    }
+}
+
+impl PerfEvent {
+    fn new(attr: &PerfEventAttr, pid: i32, cpu: i32) -> io::Result<PerfEvent> {
+        // See `perf_mmap` in the Linux kernel.
+        if cpu == -1 && (attr.flags & PERF_ATTR_FLAG_INHERIT != 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "you can't inherit to children and run on all cpus at the same time",
+            ));
+        }
+
+        let fd = sys_perf_event_open(&attr, pid as pid_t, cpu as _, -1, PERF_FLAG_FD_CLOEXEC);
+        if fd < 0 {
+            let err = io::Error::from_raw_os_error(-fd);
+            // eprintln!(
+            //     "The perf_event_open syscall failed for PID {}: {}",
+            //     pid, err
+            // );
+            if let Some(errcode) = err.raw_os_error() {
+                if errcode == libc::EINVAL {
+                    // info!("Your profiling frequency might be too high; try lowering it");
+                }
+            }
+
+            return Err(err);
+        }
+
+        Ok(PerfEvent { fd })
+    }
+
+    pub fn enable(&mut self) {
+        let result = unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_ENABLE as _) };
+
+        assert!(result != -1);
+    }
+}
+
+#[derive(Debug)]
+pub struct Perf {
+    event_ref_state: Rc<RefCell<EventRefState>>,
+    buffer: *mut u8,
+    size: u64,
+    inner: PerfEvent,
+    position: u64,
+    parse_info: RecordParseInfo,
+}
+
+
+impl AsRawFd for Perf {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
     }
 }
 
@@ -221,16 +276,14 @@ impl PerfBuilder {
         self
     }
 
-    pub fn open(self) -> io::Result<Perf> {
-        let pid = self.pid;
-        let cpu = self.cpu.map(|cpu| cpu as i32).unwrap_or(-1);
+    pub fn attr(&self) -> io::Result<PerfEventAttr> {
         let frequency = self.frequency;
-        let stack_size = self.stack_size;
         let reg_mask = self.reg_mask;
         let event_source = self.event_source;
         let inherit = self.inherit;
         let exclude_kernel = self.exclude_kernel;
         let gather_context_switches = self.gather_context_switches;
+        let stack_size = self.stack_size;
 
         // debug!(
         //     "Opening perf events; pid={}, cpu={}, frequency={}, stack_size={}, reg_mask=0x{:016X}, event_source={:?}, inherit={}...",
@@ -256,14 +309,6 @@ impl PerfBuilder {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "sample_user_stack can be at most 63kb",
-            ));
-        }
-
-        // See `perf_mmap` in the Linux kernel.
-        if cpu == -1 && inherit {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "you can't inherit to children and run on all cpus at the same time",
             ));
         }
 
@@ -337,27 +382,32 @@ impl PerfBuilder {
             attr.flags |= PERF_ATTR_FLAG_CONTEX_SWITCH;
         }
 
-        let fd = sys_perf_event_open(&attr, pid as pid_t, cpu as _, -1, PERF_FLAG_FD_CLOEXEC);
-        if fd < 0 {
-            let err = io::Error::from_raw_os_error(-fd);
-            // eprintln!(
-            //     "The perf_event_open syscall failed for PID {}: {}",
-            //     pid, err
-            // );
-            if let Some(errcode) = err.raw_os_error() {
-                if errcode == libc::EINVAL {
-                    // info!("Your profiling frequency might be too high; try lowering it");
-                }
-            }
+        Ok(attr)
+    }
 
-            return Err(err);
-        }
+    #[allow(dead_code)]
+    pub fn open_no_mmap(self) -> io::Result<PerfEvent> {
+        let pid = self.pid;
+        let cpu = self.cpu.map(|cpu| cpu as i32).unwrap_or(-1);
+        let attr = self.attr()?;
+
+        let perf = PerfEvent::new(&attr, pid as i32, cpu)?;
+        Ok(perf)
+    }
+
+    pub fn open(self) -> io::Result<Perf> {
+        let pid = self.pid;
+        let cpu = self.cpu.map(|cpu| cpu as i32).unwrap_or(-1);
+        let stack_size = self.stack_size;
+        let attr = self.attr()?;
+
+        let inner = PerfEvent::new(&attr, pid as i32, cpu)?;
 
         const STACK_COUNT_PER_BUFFER: u32 = 32;
         let required_space = max(stack_size, 4096) * STACK_COUNT_PER_BUFFER;
         let page_size = 4096;
         let n = (1..26)
-            .find(|n| (1_u32 << n) * 4096_u32 >= required_space)
+            .find(|n| (1_u32 << n) * page_size >= required_space)
             .expect("cannot find appropriate page count for given stack size");
         let page_count: u32 = max(1 << n, 16);
         // debug!(
@@ -374,24 +424,30 @@ impl PerfBuilder {
                 full_size,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED,
-                fd,
+                inner.as_raw_fd(),
                 0,
             );
             if buffer == libc::MAP_FAILED {
-                libc::close(fd);
                 return Err(io::Error::new(io::ErrorKind::Other, "mmap failed"));
             }
         }
 
-        let buffer = buffer as *mut u8;
         let size = (page_size * page_count) as u64;
 
-        let attr_bytes_ptr = &attr as *const PerfEventAttr as *const u8;
+        let perf = Perf::new(inner, buffer as *mut u8, size, &attr)?;
+        Ok(perf)
+    }
+}
+
+impl Perf {
+    pub fn new(inner: PerfEvent, buffer: *mut u8, size: u64, attr: &PerfEventAttr) -> io::Result<Perf> {
+        let attr_bytes_ptr = attr as *const PerfEventAttr as *const u8;
         let attr_bytes_len = mem::size_of::<PerfEventAttr>();
         let attr_bytes = unsafe { slice::from_raw_parts(attr_bytes_ptr, attr_bytes_len) };
         let (attr2, _size) =
-            linux_perf_event_reader::PerfEventAttr::parse::<_, byteorder::NativeEndian>(attr_bytes)
-                .unwrap();
+            linux_perf_event_reader::PerfEventAttr::parse::<_, byteorder::NativeEndian>(attr_bytes
+        )
+            .unwrap();
         let parse_info = RecordParseInfo::new(&attr2, Endianness::NATIVE);
 
         // debug!("Perf events open with fd={}", fd);
@@ -399,15 +455,13 @@ impl PerfBuilder {
             event_ref_state: Rc::new(RefCell::new(EventRefState::new(buffer, size))),
             buffer,
             size,
-            fd,
+            inner,
             position: 0,
             parse_info,
         };
         Ok(perf)
     }
-}
 
-impl Perf {
     pub fn max_sample_rate() -> Option<u64> {
         let data = std::fs::read_to_string("/proc/sys/kernel/perf_event_max_sample_rate").ok()?;
         data.trim().parse::<u64>().ok()
@@ -429,20 +483,13 @@ impl Perf {
     }
 
     pub fn enable(&mut self) {
-        let result = unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_ENABLE as _) };
-
-        assert!(result != -1);
+        self.inner.enable();
     }
 
     #[inline]
     pub fn are_events_pending(&self) -> bool {
         let head = unsafe { read_head(self.buffer) };
         head != self.position
-    }
-
-    #[inline]
-    pub fn fd(&self) -> RawFd {
-        self.fd
     }
 
     #[inline]

@@ -4,6 +4,7 @@ use std::ops::{Deref, DerefMut};
 use std::os::unix::io::RawFd;
 use std::time::Duration;
 use std::{fs, io};
+use std::os::fd::AsRawFd;
 
 use byteorder::LittleEndian;
 use linux_perf_data::linux_perf_event_reader::get_record_timestamp;
@@ -195,7 +196,7 @@ impl PerfGroup {
         }
 
         for (_cpu, perf) in perf_events {
-            let fd = perf.fd();
+            let fd = perf.as_raw_fd();
             self.members.insert(fd, Member::new(perf));
             self.poll.registry().register(
                 &mut SourceFd(&fd),
@@ -254,7 +255,7 @@ impl PerfGroup {
                 let perf = &mut member.perf;
                 if !perf.are_events_pending() {
                     if member.is_closed {
-                        fds_to_remove.push(perf.fd());
+                        fds_to_remove.push(perf.as_raw_fd());
                         continue;
                     }
                     continue;
