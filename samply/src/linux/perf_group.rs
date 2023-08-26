@@ -143,8 +143,7 @@ impl PerfGroup {
                 .sample_kernel()
                 .gather_context_switches()
                 .event_source(self.event_source)
-                .inherit_to_children()
-                .start_disabled();
+                .inherit_to_children();
 
             if attach_mode == AttachMode::AttachWithEnableOnExec {
                 builder = builder.enable_on_exec();
@@ -164,8 +163,7 @@ impl PerfGroup {
                     .sample_user_stack(self.stack_size)
                     .sample_user_regs(self.regs_mask)
                     .sample_kernel()
-                    .event_source(self.event_source)
-                    .start_disabled();
+                    .event_source(self.event_source);
                 if attach_mode == AttachMode::AttachWithEnableOnExec {
                     builder = builder.enable_on_exec();
                 }
@@ -185,8 +183,7 @@ impl PerfGroup {
                         .sample_kernel()
                         .gather_context_switches()
                         .event_source(self.event_source)
-                        .inherit_to_children()
-                        .start_disabled();
+                        .inherit_to_children();
                     if attach_mode == AttachMode::AttachWithEnableOnExec {
                         builder = builder.enable_on_exec();
                     }
