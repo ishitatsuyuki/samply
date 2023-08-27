@@ -138,7 +138,7 @@ impl PerfEvent {
         assert!(result != -1);
     }
 
-    pub fn redirect(&mut self, perf: &Perf) {
+    pub fn redirect<E: AsRawFd>(&mut self, perf: &Perf<E>) {
         let result = unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_SET_OUTPUT as _, perf.as_raw_fd()) };
 
         assert!(result != -1);
@@ -146,17 +146,17 @@ impl PerfEvent {
 }
 
 #[derive(Debug)]
-pub struct Perf {
+pub struct Perf<E: AsRawFd> {
     event_ref_state: Rc<RefCell<EventRefState>>,
     buffer: *mut u8,
     size: u64,
-    inner: PerfEvent,
+    inner: E,
     position: u64,
     parse_info: RecordParseInfo,
 }
 
 
-impl AsRawFd for Perf {
+impl<E: AsRawFd> AsRawFd for Perf<E> {
     fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
     }
@@ -307,7 +307,7 @@ impl PerfBuilder {
         //     inherit
         // );
 
-        let max_sample_rate = Perf::max_sample_rate();
+        let max_sample_rate = Perf::<PerfEvent>::max_sample_rate();
         if let Some(max_sample_rate) = max_sample_rate {
             // debug!("Maximum sample rate: {}", max_sample_rate);
             if frequency > max_sample_rate {
@@ -405,7 +405,7 @@ impl PerfBuilder {
         Ok(perf)
     }
 
-    pub fn open(self) -> io::Result<Perf> {
+    pub fn open(self) -> io::Result<Perf<PerfEvent>> {
         let pid = self.pid;
         let cpu = self.cpu.map(|cpu| cpu as i32).unwrap_or(-1);
         let stack_size = self.stack_size;
@@ -449,8 +449,25 @@ impl PerfBuilder {
     }
 }
 
-impl Perf {
-    pub fn new(inner: PerfEvent, buffer: *mut u8, size: u64, attr: &PerfEventAttr) -> io::Result<Perf> {
+impl Perf<PerfEvent> {
+    pub fn build() -> PerfBuilder {
+        PerfBuilder {
+            pid: 0,
+            cpu: None,
+            frequency: 0,
+            stack_size: 0,
+            reg_mask: 0,
+            event_source: EventSource::SwCpuClock,
+            inherit: false,
+            enable_on_exec: false,
+            exclude_kernel: true,
+            gather_context_switches: false,
+        }
+    }
+}
+
+impl<E: AsRawFd> Perf<E> {
+    pub fn new(inner: E, buffer: *mut u8, size: u64, attr: &PerfEventAttr) -> io::Result<Perf<E>> {
         let attr_bytes_ptr = attr as *const PerfEventAttr as *const u8;
         let attr_bytes_len = mem::size_of::<PerfEventAttr>();
         let attr_bytes = unsafe { slice::from_raw_parts(attr_bytes_ptr, attr_bytes_len) };
@@ -477,25 +494,6 @@ impl Perf {
         data.trim().parse::<u64>().ok()
     }
 
-    pub fn build() -> PerfBuilder {
-        PerfBuilder {
-            pid: 0,
-            cpu: None,
-            frequency: 0,
-            stack_size: 0,
-            reg_mask: 0,
-            event_source: EventSource::SwCpuClock,
-            inherit: false,
-            enable_on_exec: false,
-            exclude_kernel: true,
-            gather_context_switches: false,
-        }
-    }
-
-    pub fn enable(&mut self) {
-        self.inner.enable();
-    }
-
     #[inline]
     pub fn are_events_pending(&self) -> bool {
         let head = unsafe { read_head(self.buffer) };
@@ -503,8 +501,14 @@ impl Perf {
     }
 
     #[inline]
-    pub fn iter(&mut self) -> EventIter {
+    pub fn iter(&mut self) -> EventIter<E> {
         EventIter::new(self)
+    }
+}
+
+impl Perf<PerfEvent> {
+    pub fn enable(&mut self) {
+        self.inner.enable();
     }
 }
 
@@ -599,18 +603,18 @@ impl EventRef {
     }
 }
 
-pub struct EventIter<'a> {
-    perf: &'a mut Perf,
+pub struct EventIter<'a, E: AsRawFd> {
+    perf: &'a mut Perf<E>,
 }
 
-impl<'a> EventIter<'a> {
+impl<'a, E: AsRawFd> EventIter<'a, E> {
     #[inline]
-    fn new(perf: &'a mut Perf) -> Self {
+    fn new(perf: &'a mut Perf<E>) -> Self {
         EventIter { perf }
     }
 }
 
-impl<'a> Iterator for EventIter<'a> {
+impl<'a, E: AsRawFd> Iterator for EventIter<'a, E> {
     type Item = EventRef;
 
     #[inline]

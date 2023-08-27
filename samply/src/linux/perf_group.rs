@@ -38,13 +38,13 @@ impl Drop for StoppedProcess {
     }
 }
 
-struct Member {
-    perf: Perf,
+struct Member<E: AsRawFd> {
+    perf: Perf<E>,
     is_closed: bool,
 }
 
-impl Member {
-    fn new(perf: Perf) -> Self {
+impl<E: AsRawFd> Member<E> {
+    fn new(perf: Perf<E>) -> Self {
         Member {
             perf,
             is_closed: false,
@@ -52,14 +52,14 @@ impl Member {
     }
 }
 
-impl Deref for Member {
-    type Target = Perf;
+impl<E: AsRawFd> Deref for Member<E> {
+    type Target = Perf<E>;
     fn deref(&self) -> &Self::Target {
         &self.perf
     }
 }
 
-impl DerefMut for Member {
+impl<E: AsRawFd> DerefMut for Member<E> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.perf
     }
@@ -67,7 +67,7 @@ impl DerefMut for Member {
 
 pub struct PerfGroup {
     event_sorter: EventSorter<RawFd, u64, EventRef>,
-    members: BTreeMap<RawFd, Member>,
+    members: BTreeMap<RawFd, Member<PerfEvent>>,
     redirected_members: Vec<PerfEvent>,
     poll: Poll,
     poll_events: Events,
@@ -139,7 +139,7 @@ impl PerfGroup {
 
         let cpu_count = num_cpus::get();
         for cpu in 0..cpu_count as u32 {
-            let mut builder = Perf::build()
+            let mut builder = Perf::<PerfEvent>::build()
                 .pid(pid)
                 .only_cpu(cpu as _)
                 .frequency(self.frequency as u64)
@@ -161,7 +161,7 @@ impl PerfGroup {
 
         if cpu_count * (threads.len() + 1) >= 1000 {
             for &tid in &threads {
-                let mut builder = Perf::build()
+                let mut builder = Perf::<PerfEvent>::build()
                     .pid(tid)
                     .any_cpu()
                     .frequency(self.frequency as u64)
@@ -182,7 +182,7 @@ impl PerfGroup {
                 assert!(main_perf_cpu == &Some(cpu));
 
                 for &tid in &threads {
-                    let mut builder = Perf::build()
+                    let mut builder = Perf::<PerfEvent>::build()
                         .pid(tid)
                         .only_cpu(cpu as _)
                         .frequency(self.frequency as u64)
