@@ -4,6 +4,7 @@ use std::collections::BinaryHeap;
 use std::io;
 use std::mem;
 use std::ops::Range;
+use std::os::fd::AsRawFd;
 use std::os::unix::io::RawFd;
 use std::ptr;
 use std::rc::Rc;
@@ -11,7 +12,6 @@ use std::slice;
 use std::sync::atomic::fence;
 use std::sync::atomic::Ordering;
 use std::{cmp, fmt};
-use std::os::fd::AsRawFd;
 
 use libc::{self, c_void, pid_t};
 use linux_perf_data::linux_perf_event_reader;
@@ -139,7 +139,8 @@ impl PerfEvent {
     }
 
     pub fn redirect<E: AsRawFd>(&mut self, perf: &Perf<E>) {
-        let result = unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_SET_OUTPUT as _, perf.as_raw_fd()) };
+        let result =
+            unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_SET_OUTPUT as _, perf.as_raw_fd()) };
 
         assert!(result != -1);
     }
@@ -387,6 +388,7 @@ impl PerfBuilder {
 
         if inherit {
             attr.flags |= PERF_ATTR_FLAG_INHERIT;
+            attr.flags |= PERF_ATTR_FLAG_INHERIT_THREAD;
         }
 
         if gather_context_switches {
