@@ -363,10 +363,6 @@ mod test {
             None
         }
 
-        fn location_for_pdb_from_binary(&self, _pdb_path: &str) -> Option<Self> {
-            None
-        }
-
         fn location_for_source_file(&self, _source_file_path: &str) -> Option<Self> {
             None
         }

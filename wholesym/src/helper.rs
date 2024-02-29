@@ -767,6 +767,23 @@ impl<'h> FileAndPathHelper<'h> for Helper {
 
         Ok(paths)
     }
+
+    fn get_candidate_paths_for_pdb(
+        &self,
+        original_file_location: &Self::FL,
+        codeview_file_name: &str,
+    ) -> FileAndPathHelperResult<Vec<Self::FL>> {
+        let mut ret = vec![WholesymFileLocation::LocalFile(PathBuf::from(
+            codeview_file_name,
+        ))];
+        let file_name = codeview_file_name.rsplit(['\\', '/']).next().unwrap();
+        if let WholesymFileLocation::LocalFile(original_file_path) = original_file_location {
+            let sup_file_path = original_file_path
+                .with_file_name(file_name);
+            ret.push(WholesymFileLocation::LocalFile(sup_file_path));
+        }
+        Ok(ret)
+    }
 }
 
 fn get_dyld_shared_cache_paths(arch: Option<&str>) -> Vec<WholesymFileLocation> {

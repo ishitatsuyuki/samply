@@ -206,10 +206,6 @@
 //!         Some(Self(object_file.into()))
 //!     }
 //!
-//!     fn location_for_pdb_from_binary(&self, pdb_path_in_binary: &str) -> Option<Self> {
-//!         Some(Self(pdb_path_in_binary.into()))
-//!     }
-//!
 //!     fn location_for_source_file(&self, source_file_path: &str) -> Option<Self> {
 //!         Some(Self(source_file_path.into()))
 //!     }
@@ -259,7 +255,7 @@ pub use crate::breakpad::{
 };
 pub use crate::cache::{FileByteSource, FileContentsWithChunkedCaching};
 pub use crate::compact_symbol_table::CompactSymbolTable;
-pub use crate::debugid_util::{debug_id_for_object, DebugIdExt};
+pub use crate::debugid_util::{debug_id_for_object, DebugIdExt, library_info_for_object};
 pub use crate::error::Error;
 pub use crate::external_file::{load_external_file, ExternalFileSymbolMap};
 pub use crate::jitdump::debug_id_and_code_id_for_jitdump;
@@ -638,7 +634,7 @@ where
                 )),
             }
         } else if windows::is_pdb_file(&file_contents) {
-            windows::get_symbol_map_for_pdb(file_contents, file_location)
+            windows::get_symbol_map_for_pdb(file_location, self.helper).await
         } else if breakpad::is_breakpad_file(&file_contents) {
             let index_file_contents =
                 if let Some(index_file_location) = file_location.location_for_breakpad_symindex() {

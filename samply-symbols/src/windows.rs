@@ -1,3 +1,16 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::Mutex;
+
+use debugid::DebugId;
+use nom::bytes::complete::{tag, take_until1};
+use nom::combinator::eof;
+use nom::sequence::terminated;
+use object::{File, FileKind};
+use pdb::PDB;
+use pdb_addr2line::pdb;
+
 use crate::debugid_util::debug_id_for_object;
 use crate::error::{Context, Error};
 use crate::path_mapper::{ExtraPathMapper, PathMapper};
@@ -11,17 +24,6 @@ use crate::symbol_map::{
 };
 use crate::symbol_map_object::{FunctionAddressesComputer, ObjectSymbolMapDataMid};
 use crate::{demangle, FileLocation, MappedPath, SourceFilePath};
-use debugid::DebugId;
-use nom::bytes::complete::{tag, take_until1};
-use nom::combinator::eof;
-use nom::sequence::terminated;
-use object::{File, FileKind};
-use pdb::PDB;
-use pdb_addr2line::pdb;
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::sync::Mutex;
 
 pub async fn load_symbol_map_for_pdb_corresponding_to_binary<
     'h,
@@ -45,21 +47,16 @@ pub async fn load_symbol_map_for_pdb_corresponding_to_binary<
 
     let pdb_path_str = std::str::from_utf8(info.path())
         .map_err(|_| Error::PdbPathNotUtf8(file_location.to_string()))?;
-    let pdb_location = file_location
-        .location_for_pdb_from_binary(pdb_path_str)
-        .ok_or(Error::FileLocationRefusedPdbLocation)?;
-    let pdb_file = helper
-        .load_file(pdb_location)
-        .await
-        .map_err(|e| Error::HelperErrorDuringOpenFile(pdb_path_str.to_string(), e))?;
-    let symbol_map = get_symbol_map_for_pdb(FileContentsWrapper::new(pdb_file), file_location)?;
-    if symbol_map.debug_id() != binary_debug_id {
-        return Err(Error::UnmatchedDebugId(
-            binary_debug_id,
-            symbol_map.debug_id(),
-        ));
+    let candidates = helper
+        .get_candidate_paths_for_pdb(&file_location, pdb_path_str)
+        .map_err(|_| Error::FileLocationRefusedPdbLocation)?;
+    for pdb_location in candidates {
+        let symbol_map = get_symbol_map_for_pdb(pdb_location, helper).await;
+        if symbol_map.is_ok() {
+            return symbol_map;
+        }
     }
-    Ok(symbol_map)
+    Err(Error::FileLocationRefusedPdbLocation)
 }
 
 pub fn get_symbol_map_for_pe<F, FL>(
@@ -319,15 +316,18 @@ impl<T: FileContents + 'static> SymbolMapDataOuterTrait for PdbSymbolData<T> {
     }
 }
 
-pub fn get_symbol_map_for_pdb<F, FL>(
-    file_contents: FileContentsWrapper<F>,
-    debug_file_location: FL,
-) -> Result<SymbolMap<FL>, Error>
+pub async fn get_symbol_map_for_pdb<'h, H>(
+    debug_file_location: H::FL,
+    helper: &'h H,
+) -> Result<SymbolMap<H::FL>, Error>
 where
-    F: FileContents + 'static,
-    FL: FileLocation,
+    H: FileAndPathHelper<'h>,
 {
-    let symbol_map = GenericSymbolMap::new(PdbSymbolData(file_contents))?;
+    let pdb_file = helper
+        .load_file(debug_file_location.clone())
+        .await
+        .map_err(|e| Error::HelperErrorDuringOpenFile(debug_file_location.to_string(), e))?;
+    let symbol_map = GenericSymbolMap::new(PdbSymbolData(FileContentsWrapper::new(pdb_file)))?;
     Ok(SymbolMap::new(debug_file_location, Box::new(symbol_map)))
 }
 

@@ -131,10 +131,6 @@ impl FileLocation for ExampleFileLocation {
         Some(Self(object_file.into()))
     }
 
-    fn location_for_pdb_from_binary(&self, pdb_path_in_binary: &str) -> Option<Self> {
-        Some(Self(pdb_path_in_binary.into()))
-    }
-
     fn location_for_source_file(&self, source_file_path: &str) -> Option<Self> {
         Some(Self(source_file_path.into()))
     }

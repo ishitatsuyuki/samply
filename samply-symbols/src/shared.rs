@@ -336,6 +336,14 @@ pub trait FileAndPathHelper<'h> {
         Ok(Vec::new())
     }
 
+    fn get_candidate_paths_for_pdb(
+        &self,
+        _original_file_location: &Self::FL,
+        _codeview_file_name: &str,
+    ) -> FileAndPathHelperResult<Vec<Self::FL>> {
+        Ok(Vec::new())
+    }
+
     /// This method is the entry point for file access during symbolication.
     /// The implementer needs to return an object which implements the `FileContents` trait.
     /// This method is asynchronous, but once it returns, the file data needs to be

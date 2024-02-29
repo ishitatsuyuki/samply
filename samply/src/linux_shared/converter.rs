@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::{ops::Range, path::Path};
+use wholesym::samply_symbols::library_info_for_object;
 
 use super::context_switch::{ContextSwitchHandler, OffCpuSampleGroup};
 use super::convert_regs::ConvertRegs;
@@ -1179,19 +1180,15 @@ where
             } else {
                 return;
             };
-            let code_id = file
-                .build_id()
-                .ok()
-                .flatten()
-                .map(|build_id| CodeId::from_binary(build_id).to_string());
+            let (code_id, debug_path, debug_name, arch) = library_info_for_object(&mmap[..], FileKind::parse(&mmap[..]).unwrap(), &file, &Some(path.clone()), &Some(name.clone()));
             let lib_handle = self.profile.add_lib(LibraryInfo {
                 debug_id,
-                code_id,
+                code_id: code_id.map(|code_id| code_id.to_string()),
                 path: path.clone(),
-                debug_path: path,
-                debug_name: name.clone(),
+                debug_path: debug_path.unwrap_or(path.clone()),
+                debug_name: debug_name.unwrap_or(name.clone()),
                 name: name.clone(),
-                arch: None,
+                arch,
                 symbol_table: None,
             });
 

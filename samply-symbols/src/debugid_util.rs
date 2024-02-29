@@ -1,6 +1,9 @@
 use debugid::DebugId;
-use object::{Object, ObjectSection};
+use object::{FileKind, Object, ObjectSection, ReadRef};
+use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile, PeFile32, PeFile64};
 use uuid::Uuid;
+use crate::macho::MachOData;
+use crate::PeCodeId;
 
 use crate::shared::{CodeId, ElfBuildId};
 
@@ -116,4 +119,99 @@ pub fn code_id_for_object<'data: 'file, 'file>(
     }
 
     None
+}
+
+struct PeInfo {
+    code_id: CodeId,
+    pdb_path: Option<String>,
+    pdb_name: Option<String>,
+}
+
+impl PeInfo {
+    pub fn into_tuple(self) -> (Option<CodeId>, Option<String>, Option<String>) {
+        (Some(self.code_id), self.pdb_path, self.pdb_name)
+    }
+}
+
+fn pe_info<'a, Pe: ImageNtHeaders, R: ReadRef<'a>>(pe: &PeFile<'a, Pe, R>) -> PeInfo {
+    // The code identifier consists of the `time_date_stamp` field id the COFF header, followed by
+    // the `size_of_image` field in the optional header. If the optional PE header is not present,
+    // this identifier is `None`.
+    let header = pe.nt_headers();
+    let timestamp = header
+        .file_header()
+        .time_date_stamp
+        .get(object::LittleEndian);
+    let image_size = header.optional_header().size_of_image();
+    let code_id = CodeId::PeCodeId(PeCodeId {
+        timestamp,
+        image_size,
+    });
+
+    let pdb_path: Option<String> = pe.pdb_info().ok().and_then(|pdb_info| {
+        let pdb_path = std::str::from_utf8(pdb_info?.path()).ok()?;
+        Some(pdb_path.to_string())
+    });
+
+    let pdb_name = pdb_path
+        .as_deref()
+        .map(|pdb_path| match pdb_path.rsplit_once(['/', '\\']) {
+            Some((_base, file_name)) => file_name.to_string(),
+            None => pdb_path.to_string(),
+        });
+
+    PeInfo {
+        code_id,
+        pdb_path,
+        pdb_name,
+    }
+}
+
+fn object_arch_to_string(arch: object::Architecture) -> Option<&'static str> {
+    let s = match arch {
+        object::Architecture::Arm => "arm",
+        object::Architecture::Aarch64 => "arm64",
+        object::Architecture::I386 => "x86",
+        object::Architecture::X86_64 => "x86_64",
+        _ => return None,
+    };
+    Some(s)
+}
+
+pub fn library_info_for_object<'data: 'file, 'file, R: ReadRef<'file>>(
+    file: R,
+    file_kind: FileKind,
+    object: &'file impl Object<'data, 'file>,
+    path: &Option<String>,
+    name: &Option<String>,
+) -> (Option<CodeId>, Option<String>, Option<String>, Option<String>) {
+    match file_kind {
+        FileKind::Pe32 | FileKind::Pe64 => {
+            let (code_id, debug_path, debug_name) =
+                if let Ok(pe) = PeFile64::parse(file) {
+                    pe_info(&pe).into_tuple()
+                } else if let Ok(pe) = PeFile32::parse(file) {
+                    pe_info(&pe).into_tuple()
+                } else {
+                    (None, None, None)
+                };
+            let arch =
+                object_arch_to_string(object.architecture()).map(ToOwned::to_owned);
+            (code_id, debug_path, debug_name, arch)
+        }
+        FileKind::MachO32 | FileKind::MachO64 => {
+            let macho_data = MachOData::new(file, 0, file_kind == FileKind::MachO64);
+            let code_id = code_id_for_object(object);
+            let arch = macho_data.get_arch().map(ToOwned::to_owned);
+            let (debug_path, debug_name) = (path.clone(), name.clone());
+            (code_id, debug_path, debug_name, arch)
+        }
+        _ => {
+            let code_id = code_id_for_object(object);
+            let (debug_path, debug_name) = (path.clone(), name.clone());
+            let arch =
+                object_arch_to_string(object.architecture()).map(ToOwned::to_owned);
+            (code_id, debug_path, debug_name, arch)
+        }
+    }
 }

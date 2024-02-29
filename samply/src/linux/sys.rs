@@ -48,6 +48,7 @@ pub const PERF_ATTR_FLAG_MMAP2: u64 = flag!(23);
 pub const PERF_ATTR_FLAG_COMM_EXEC: u64 = flag!(24);
 pub const PERF_ATTR_FLAG_USE_CLOCKID: u64 = flag!(25);
 pub const PERF_ATTR_FLAG_CONTEX_SWITCH: u64 = flag!(26);
+pub const PERF_ATTR_FLAG_INHERIT_THREAD: u64 = flag!(35);
 
 pub const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
 pub const PERF_COUNT_HW_REF_CPU_CYCLES: u64 = 9;
