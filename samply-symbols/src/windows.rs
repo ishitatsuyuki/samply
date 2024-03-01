@@ -7,11 +7,14 @@ use debugid::DebugId;
 use nom::bytes::complete::{tag, take_until1};
 use nom::combinator::eof;
 use nom::sequence::terminated;
-use object::{File, FileKind};
+use object::{File, FileKind, Object, ReadRef};
+use object::read::pe::{ImageNtHeaders, PeFile64};
 use pdb::PDB;
 use pdb_addr2line::pdb;
 use yoke::Yoke;
 use yoke_derive::Yokeable;
+use pe_unwind_info::x86_64::{RuntimeFunction, UnwindInfo, UnwindInfoTrailer};
+use zerocopy::FromBytes;
 
 use crate::debugid_util::debug_id_for_object;
 use crate::dwarf::Addr2lineContextData;
@@ -141,8 +144,8 @@ impl<T: FileContents + 'static> ObjectSymbolMapOuter<T> for PeSymbolMapDataAndOb
     }
 }
 
-fn compute_function_addresses_pe<'data, O: object::Object<'data>>(
-    object_file: &O,
+fn compute_function_addresses_pe<'data, R: ReadRef<'data>>(
+    object_file: &File<'data, R>
 ) -> (Option<Vec<u32>>, Option<Vec<u32>>) {
     // Get function start and end addresses from the function list in .pdata.
     use object::ObjectSection;
@@ -150,8 +153,13 @@ fn compute_function_addresses_pe<'data, O: object::Object<'data>>(
         .section_by_name_bytes(b".pdata")
         .and_then(|s| s.data().ok())
     {
-        let (s, e) = function_start_and_end_addresses(pdata);
-        (Some(s), Some(e))
+        match object_file {
+            File::Pe64(pe) => {
+                let (s, e) = function_start_and_end_addresses(&pe, pdata);
+                (Some(s), Some(e))
+            }
+            _ => (None, None),
+        }
     } else {
         (None, None)
     }
@@ -578,16 +586,38 @@ impl<'s, F: FileContents> pdb::Source<'s> for &'s FileContentsWrapper<F> {
 /// This section has the addresses for functions with unwind info. That means
 /// it only covers a subset of functions; it does not include entries for
 /// leaf functions which don't allocate any stack space.
-fn function_start_and_end_addresses(pdata: &[u8]) -> (Vec<u32>, Vec<u32>) {
-    let mut start_addresses = Vec::new();
-    let mut end_addresses = Vec::new();
-    for entry in pdata.chunks_exact(3 * std::mem::size_of::<u32>()) {
-        let start_address = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
-        let end_address = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
-        start_addresses.push(start_address);
-        end_addresses.push(end_address);
+fn function_start_and_end_addresses<'data, R: ReadRef<'data>>(file: &PeFile64<'data, R>, pdata: &[u8]) -> (Vec<u32>, Vec<u32>) {
+    struct Entry {
+        start_address: u32,
+        end_address: u32,
+        canonical_start_address: u32,
     }
-    (start_addresses, end_addresses)
+    let mut entries = Vec::new();
+    let sections = file.section_table();
+    for entry in pdata.chunks_exact(3 * std::mem::size_of::<u32>()) {
+        let runtime_function = RuntimeFunction::ref_from(entry).unwrap();
+        let mut canonical_frame = runtime_function;
+        loop {
+            let unwind_info_rva = canonical_frame.unwind_info_address.get();
+            let unwind_info = sections.pe_data_at(file.data(), unwind_info_rva).and_then(|data| UnwindInfo::parse(data));
+            if let Some(UnwindInfoTrailer::ChainedUnwindInfo { chained }) = unwind_info.and_then(|info| info.trailer()) {
+                canonical_frame = chained;
+            } else {
+                break;
+            }
+        }
+        entries.push(Entry {
+            start_address: runtime_function.begin_address.get(),
+            end_address: runtime_function.end_address.get(),
+            canonical_start_address: canonical_frame.begin_address.get(),
+        });
+    }
+    entries
+        .chunk_by(|lhs, rhs| lhs.canonical_start_address == rhs.canonical_start_address)
+        .map(|e| {
+            (e.first().unwrap().start_address, e.last().unwrap().end_address)
+        })
+        .unzip()
 }
 
 fn parse_gitiles_url(input: &str) -> Result<MappedPath, nom::Err<nom::error::Error<&str>>> {

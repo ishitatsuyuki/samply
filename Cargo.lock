@@ -1926,6 +1926,7 @@ dependencies = [
  "nom",
  "object 0.35.0",
  "pdb-addr2line",
+ "pe-unwind-info",
  "rangemap",
  "rustc-demangle",
  "scala-native-demangle",
