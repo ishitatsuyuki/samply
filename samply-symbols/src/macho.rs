@@ -206,14 +206,14 @@ where
     H: FileAndPathHelper,
 {
     helper: &'a H,
-    dyld_cache_path: &'a H::FL,
+    dyld_cache_path: &'a FileLocation,
 }
 
 impl<'a, H, F> DyldCacheLoader<'a, H>
 where
     H: FileAndPathHelper<F = F>,
 {
-    pub fn new(helper: &'a H, dyld_cache_path: &'a H::FL) -> Self {
+    pub fn new(helper: &'a H, dyld_cache_path: &'a FileLocation) -> Self {
         Self {
             helper,
             dyld_cache_path,
@@ -240,7 +240,7 @@ where
 }
 
 async fn load_file_data_for_dyld_cache<H, F>(
-    dyld_cache_path: H::FL,
+    dyld_cache_path: FileLocation,
     dylib_path: String,
     helper: &H,
 ) -> Result<DyldCacheFileData<F>, Error>
@@ -278,7 +278,7 @@ where
 }
 
 pub async fn load_symbol_map_for_dyld_cache<H>(
-    dyld_cache_path: H::FL,
+    dyld_cache_path: FileLocation,
     dylib_path: String,
     helper: &H,
 ) -> Result<SymbolMap<H>, Error>
@@ -425,7 +425,7 @@ impl<T: FileContents + 'static> ObjectSymbolMapOuter<T> for FileDataAndObject<T>
 }
 
 pub fn get_symbol_map_for_macho<H: FileAndPathHelper>(
-    debug_file_location: H::FL,
+    debug_file_location: FileLocation,
     file_contents: FileContentsWrapper<H::F>,
     helper: Arc<H>,
 ) -> Result<SymbolMap<H>, Error> {
@@ -439,7 +439,7 @@ pub fn get_symbol_map_for_macho<H: FileAndPathHelper>(
 }
 
 pub fn get_symbol_map_for_fat_archive_member<H: FileAndPathHelper>(
-    debug_file_location: H::FL,
+    debug_file_location: FileLocation,
     file_contents: FileContentsWrapper<H::F>,
     member: FatArchiveMember,
     helper: Arc<H>,
@@ -516,7 +516,7 @@ impl<T: FileContents + 'static> MakeMachObject<T> for MachOFatArchiveMemberData<
 }
 
 pub async fn load_binary_from_dyld_cache<F, H>(
-    dyld_cache_path: H::FL,
+    dyld_cache_path: FileLocation,
     dylib_path: String,
     helper: &H,
 ) -> Result<BinaryImage<F>, Error>

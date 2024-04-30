@@ -16,7 +16,7 @@ async fn get_symbol_map_with_dyld_cache_fallback(
     let might_be_in_dyld_shared_cache = path.starts_with("/usr/") || path.starts_with("/System/");
 
     let disambiguator = debug_id.map(MultiArchDisambiguator::DebugId);
-    let location = FileLocationType(path.to_owned());
+    let location = FileLocation::LocalFile(path.to_owned());
 
     match symbol_manager
         .load_symbol_map_from_location(location, disambiguator.clone())
@@ -81,67 +81,17 @@ struct Helper {
 
 type FileContentsType = memmap2::Mmap;
 
-#[derive(Clone)]
-struct FileLocationType(PathBuf);
-
-impl FileLocationType {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self(path.into())
-    }
-}
-
-impl std::fmt::Display for FileLocationType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.to_string_lossy().fmt(f)
-    }
-}
-
-impl FileLocation for FileLocationType {
-    fn location_for_dyld_subcache(&self, suffix: &str) -> Option<Self> {
-        let mut filename = self.0.file_name().unwrap().to_owned();
-        filename.push(suffix);
-        Some(Self(self.0.with_file_name(filename)))
-    }
-
-    fn location_for_external_object_file(&self, object_file: &str) -> Option<Self> {
-        Some(Self(object_file.into()))
-    }
-
-    fn location_for_pdb_from_binary(&self, pdb_path_in_binary: &str) -> Option<Self> {
-        Some(Self(pdb_path_in_binary.into()))
-    }
-
-    fn location_for_source_file(&self, source_file_path: &str) -> Option<Self> {
-        Some(Self(source_file_path.into()))
-    }
-
-    fn location_for_breakpad_symindex(&self) -> Option<Self> {
-        Some(Self(self.0.with_extension("symindex")))
-    }
-
-    fn location_for_dwo(&self, _comp_dir: &str, _path: &str) -> Option<Self> {
-        None // TODO
-    }
-
-    fn location_for_dwp(&self) -> Option<Self> {
-        let mut s = self.0.as_os_str().to_os_string();
-        s.push(".dwp");
-        Some(Self(s.into()))
-    }
-}
-
 fn mmap_to_file_contents(m: memmap2::Mmap) -> FileContentsType {
     m
 }
 
 impl FileAndPathHelper for Helper {
     type F = FileContentsType;
-    type FL = FileLocationType;
 
     fn get_candidate_paths_for_debug_file(
         &self,
         library_info: &LibraryInfo,
-    ) -> FileAndPathHelperResult<Vec<CandidatePathInfo<Self::FL>>> {
+    ) -> FileAndPathHelperResult<Vec<CandidatePathInfo>> {
         let debug_name = match library_info.debug_name.as_deref() {
             Some(debug_name) => debug_name,
             None => return Ok(Vec::new()),
@@ -152,14 +102,14 @@ impl FileAndPathHelper for Helper {
         // Also consider .so.dbg files in the symbol directory.
         if debug_name.ends_with(".so") {
             let debug_debug_name = format!("{debug_name}.dbg");
-            paths.push(CandidatePathInfo::SingleFile(FileLocationType(
+            paths.push(CandidatePathInfo::SingleFile(FileLocation::LocalFile(
                 self.symbol_directory.join(debug_debug_name),
             )));
         }
 
         // And dSYM packages.
         if !debug_name.ends_with(".pdb") {
-            paths.push(CandidatePathInfo::SingleFile(FileLocationType(
+            paths.push(CandidatePathInfo::SingleFile(FileLocation::LocalFile(
                 self.symbol_directory
                     .join(format!("{debug_name}.dSYM"))
                     .join("Contents")
@@ -170,7 +120,7 @@ impl FileAndPathHelper for Helper {
         }
 
         // Finally, the file itself.
-        paths.push(CandidatePathInfo::SingleFile(FileLocationType(
+        paths.push(CandidatePathInfo::SingleFile(FileLocation::LocalFile(
             self.symbol_directory.join(debug_name),
         )));
 
@@ -179,11 +129,14 @@ impl FileAndPathHelper for Helper {
 
     fn load_file(
         &self,
-        location: Self::FL,
+        location: FileLocation,
     ) -> std::pin::Pin<Box<dyn OptionallySendFuture<Output = FileAndPathHelperResult<Self::F>> + '_>>
     {
         Box::pin(async {
-            let path = location.0;
+            let path = match location {
+                FileLocation::LocalFile(path) => path,
+                _ => unimplemented!(),
+            };
             eprintln!("Opening file {:?}", &path);
             let file = File::open(&path)?;
             let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
@@ -194,7 +147,7 @@ impl FileAndPathHelper for Helper {
     fn get_candidate_paths_for_binary(
         &self,
         library_info: &LibraryInfo,
-    ) -> FileAndPathHelperResult<Vec<CandidatePathInfo<Self::FL>>> {
+    ) -> FileAndPathHelperResult<Vec<CandidatePathInfo>> {
         let name = match library_info.name.as_deref() {
             Some(name) => name,
             None => return Ok(Vec::new()),
@@ -203,7 +156,7 @@ impl FileAndPathHelper for Helper {
         let mut paths = vec![];
 
         // Start with the file itself.
-        paths.push(CandidatePathInfo::SingleFile(FileLocationType(
+        paths.push(CandidatePathInfo::SingleFile(FileLocation::LocalFile(
             self.symbol_directory.join(name),
         )));
 
@@ -230,11 +183,11 @@ impl FileAndPathHelper for Helper {
     fn get_dyld_shared_cache_paths(
         &self,
         _arch: Option<&str>,
-    ) -> FileAndPathHelperResult<Vec<FileLocationType>> {
+    ) -> FileAndPathHelperResult<Vec<FileLocation>> {
         Ok(vec![
-            FileLocationType::new("/System/Library/dyld/dyld_shared_cache_arm64e"),
-            FileLocationType::new("/System/Library/dyld/dyld_shared_cache_x86_64h"),
-            FileLocationType::new("/System/Library/dyld/dyld_shared_cache_x86_64"),
+            FileLocation::LocalFile("/System/Library/dyld/dyld_shared_cache_arm64e".into()),
+            FileLocation::LocalFile("/System/Library/dyld/dyld_shared_cache_x86_64h".into()),
+            FileLocation::LocalFile("/System/Library/dyld/dyld_shared_cache_x86_64".into()),
         ])
     }
 }
@@ -426,7 +379,7 @@ fn linux_nonzero_base_address() {
     };
     let symbol_manager = SymbolManager::with_helper(helper);
     let symbol_map = futures::executor::block_on(symbol_manager.load_symbol_map_from_location(
-        FileLocationType(fixtures_dir().join("linux64-ci").join("firefox")),
+        FileLocation::LocalFile(fixtures_dir().join("linux64-ci").join("firefox")),
         None,
     ))
     .unwrap();
@@ -500,7 +453,7 @@ fn example_linux() {
     };
     let symbol_manager = SymbolManager::with_helper(helper);
     let symbol_map = futures::executor::block_on(symbol_manager.load_symbol_map_from_location(
-        FileLocationType(fixtures_dir().join("other").join("example-linux")),
+        FileLocation::LocalFile(fixtures_dir().join("other").join("example-linux")),
         None,
     ))
     .unwrap();
@@ -538,7 +491,7 @@ fn example_linux_fallback() {
     };
     let symbol_manager = SymbolManager::with_helper(helper);
     let symbol_map = futures::executor::block_on(symbol_manager.load_symbol_map_from_location(
-        FileLocationType(fixtures_dir().join("other").join("example-linux-fallback")),
+        FileLocation::LocalFile(fixtures_dir().join("other").join("example-linux-fallback")),
         None,
     ))
     .unwrap();

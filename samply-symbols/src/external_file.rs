@@ -11,10 +11,11 @@ use crate::shared::{
     ExternalFileAddressInFileRef, FileAndPathHelper, FileContents, FileContentsWrapper,
     FrameDebugInfo,
 };
+use crate::FileLocation;
 
 pub async fn load_external_file<H>(
     helper: &H,
-    external_file_location: H::FL,
+    external_file_location: FileLocation,
     external_file_path: &str,
 ) -> Result<ExternalFileSymbolMap<H::F>, Error>
 where

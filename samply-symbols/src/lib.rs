@@ -117,14 +117,13 @@
 //!
 //! impl FileAndPathHelper for ExampleHelper {
 //!     type F = Vec<u8>;
-//!     type FL = ExampleFileLocation;
 //!
 //!     fn get_candidate_paths_for_debug_file(
 //!         &self,
 //!         library_info: &LibraryInfo,
-//!     ) -> FileAndPathHelperResult<Vec<CandidatePathInfo<ExampleFileLocation>>> {
+//!     ) -> FileAndPathHelperResult<Vec<CandidatePathInfo>> {
 //!         if let Some(debug_name) = library_info.debug_name.as_deref() {
-//!             Ok(vec![CandidatePathInfo::SingleFile(ExampleFileLocation(
+//!             Ok(vec![CandidatePathInfo::SingleFile(FileLocation::LocalFile(
 //!                 self.artifact_directory.join(debug_name),
 //!             ))])
 //!         } else {
@@ -135,9 +134,9 @@
 //!     fn get_candidate_paths_for_binary(
 //!         &self,
 //!         library_info: &LibraryInfo,
-//!     ) -> FileAndPathHelperResult<Vec<CandidatePathInfo<ExampleFileLocation>>> {
+//!     ) -> FileAndPathHelperResult<Vec<CandidatePathInfo>> {
 //!         if let Some(name) = library_info.name.as_deref() {
-//!             Ok(vec![CandidatePathInfo::SingleFile(ExampleFileLocation(
+//!             Ok(vec![CandidatePathInfo::SingleFile(FileLocation::LocalFile(
 //!                 self.artifact_directory.join(name),
 //!             ))])
 //!         } else {
@@ -148,58 +147,21 @@
 //!    fn get_dyld_shared_cache_paths(
 //!        &self,
 //!        _arch: Option<&str>,
-//!    ) -> FileAndPathHelperResult<Vec<ExampleFileLocation>> {
+//!    ) -> FileAndPathHelperResult<Vec<FileLocation>> {
 //!        Ok(vec![])
 //!    }
 //!
 //!     fn load_file(
 //!         &self,
-//!         location: ExampleFileLocation,
+//!         location: FileLocation,
 //!     ) -> std::pin::Pin<Box<dyn OptionallySendFuture<Output = FileAndPathHelperResult<Self::F>> + '_>> {
-//!         Box::pin(async move { Ok(std::fs::read(&location.0)?) })
-//!     }
-//! }
-//!
-//! #[derive(Clone, Debug)]
-//! struct ExampleFileLocation(std::path::PathBuf);
-//!
-//! impl std::fmt::Display for ExampleFileLocation {
-//!     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//!         self.0.to_string_lossy().fmt(f)
-//!     }
-//! }
-//!
-//! impl FileLocation for ExampleFileLocation {
-//!     fn location_for_dyld_subcache(&self, suffix: &str) -> Option<Self> {
-//!         let mut filename = self.0.file_name().unwrap().to_owned();
-//!         filename.push(suffix);
-//!         Some(Self(self.0.with_file_name(filename)))
-//!     }
-//!
-//!     fn location_for_external_object_file(&self, object_file: &str) -> Option<Self> {
-//!         Some(Self(object_file.into()))
-//!     }
-//!
-//!     fn location_for_pdb_from_binary(&self, pdb_path_in_binary: &str) -> Option<Self> {
-//!         Some(Self(pdb_path_in_binary.into()))
-//!     }
-//!
-//!     fn location_for_source_file(&self, source_file_path: &str) -> Option<Self> {
-//!         Some(Self(source_file_path.into()))
-//!     }
-//!
-//!     fn location_for_breakpad_symindex(&self) -> Option<Self> {
-//!         Some(Self(self.0.with_extension("symindex")))
-//!     }
-//!
-//!     fn location_for_dwo(&self, _comp_dir: &str, path: &str) -> Option<Self> {
-//!         Some(Self(path.into()))
-//!     }
-//!
-//!     fn location_for_dwp(&self) -> Option<Self> {
-//!         let mut s = self.0.as_os_str().to_os_string();
-//!         s.push(".dwp");
-//!         Some(Self(s.into()))
+//!         Box::pin(async move {
+//!             let path = match location {
+//!                 FileLocation::LocalFile(path) => path,
+//!                 _ => unimplemented!(),
+//!             };
+//!             Ok(std::fs::read(&path)?)
+//!         })
 //!     }
 //! }
 //! ```
@@ -264,11 +226,10 @@ pub struct SymbolManager<H: FileAndPathHelper> {
     helper: Arc<H>,
 }
 
-impl<H, F, FL> SymbolManager<H>
+impl<H, F> SymbolManager<H>
 where
-    H: FileAndPathHelper<F = F, FL = FL>,
+    H: FileAndPathHelper<F = F>,
     F: FileContents + 'static,
-    FL: FileLocation,
 {
     // Create a new `SymbolManager`.
     pub fn with_helper(helper: H) -> Self {
@@ -284,7 +245,7 @@ where
 
     pub async fn load_source_file(
         &self,
-        debug_file_location: &H::FL,
+        debug_file_location: &FileLocation,
         source_file_path: &SourceFilePath,
     ) -> Result<String, Error> {
         let source_file_location = debug_file_location
@@ -375,7 +336,7 @@ where
     /// Also see `SymbolMap::lookup_external`.
     pub async fn load_external_file(
         &self,
-        debug_file_location: &H::FL,
+        debug_file_location: &FileLocation,
         external_file_path: &str,
     ) -> Result<ExternalFileSymbolMap<H::F>, Error> {
         let external_file_location = debug_file_location
@@ -387,7 +348,7 @@ where
 
     async fn load_binary_from_dyld_cache(
         &self,
-        dyld_cache_path: FL,
+        dyld_cache_path: FileLocation,
         dylib_path: String,
     ) -> Result<BinaryImage<F>, Error> {
         macho::load_binary_from_dyld_cache(dyld_cache_path, dylib_path, &*self.helper).await
@@ -540,7 +501,7 @@ where
 
     pub async fn load_symbol_map_from_location(
         &self,
-        file_location: FL,
+        file_location: FileLocation,
         multi_arch_disambiguator: Option<MultiArchDisambiguator>,
     ) -> Result<SymbolMap<H>, Error> {
         let file_contents = self
@@ -627,7 +588,7 @@ where
 
     pub async fn load_binary_at_location(
         &self,
-        file_location: H::FL,
+        file_location: FileLocation,
         name: Option<String>,
         path: Option<String>,
         multi_arch_disambiguator: Option<MultiArchDisambiguator>,

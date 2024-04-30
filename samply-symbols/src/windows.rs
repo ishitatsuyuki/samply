@@ -31,7 +31,7 @@ use crate::{demangle, SyncAddressInfo};
 pub async fn load_symbol_map_for_pdb_corresponding_to_binary<H: FileAndPathHelper>(
     file_kind: FileKind,
     file_contents: &FileContentsWrapper<H::F>,
-    file_location: H::FL,
+    file_location: FileLocation,
     helper: &H,
 ) -> Result<SymbolMap<H>, Error> {
     use object::Object;
@@ -66,7 +66,7 @@ pub async fn load_symbol_map_for_pdb_corresponding_to_binary<H: FileAndPathHelpe
 pub fn get_symbol_map_for_pe<H: FileAndPathHelper>(
     file_contents: FileContentsWrapper<H::F>,
     file_kind: FileKind,
-    file_location: H::FL,
+    file_location: FileLocation,
     helper: Arc<H>,
 ) -> Result<SymbolMap<H>, Error> {
     let owner = PeSymbolMapDataAndObject::new(file_contents, file_kind)?;
@@ -413,7 +413,7 @@ impl<T: FileContents> SymbolMapTrait for PdbSymbolMap<T> {
 
 pub fn get_symbol_map_for_pdb<H: FileAndPathHelper>(
     file_contents: FileContentsWrapper<H::F>,
-    debug_file_location: H::FL,
+    debug_file_location: FileLocation,
 ) -> Result<SymbolMap<H>, Error> {
     let file_data_and_object = PdbObjectWithFileData::new(PdbFileData(file_contents))?;
     let symbol_map = PdbSymbolMap::new(file_data_and_object)?;

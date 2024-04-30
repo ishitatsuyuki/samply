@@ -43,14 +43,14 @@ enum InnerSymbolMap<FC> {
 }
 
 pub struct SymbolMap<H: FileAndPathHelper> {
-    debug_file_location: H::FL,
+    debug_file_location: FileLocation,
     inner: InnerSymbolMap<H::F>,
     helper: Option<Arc<H>>,
 }
 
 impl<H: FileAndPathHelper> SymbolMap<H> {
     pub(crate) fn new_plain(
-        debug_file_location: H::FL,
+        debug_file_location: FileLocation,
         inner: Box<dyn GetInnerSymbolMap + Send + Sync>,
     ) -> Self {
         Self {
@@ -61,7 +61,7 @@ impl<H: FileAndPathHelper> SymbolMap<H> {
     }
 
     pub(crate) fn new_with_external_file_support(
-        debug_file_location: H::FL,
+        debug_file_location: FileLocation,
         inner: Box<dyn GetInnerSymbolMapWithLookupFramesExt<H::F> + Send + Sync>,
         helper: Arc<H>,
     ) -> Self {
@@ -79,7 +79,7 @@ impl<H: FileAndPathHelper> SymbolMap<H> {
         }
     }
 
-    pub fn debug_file_location(&self) -> &H::FL {
+    pub fn debug_file_location(&self) -> &FileLocation {
         &self.debug_file_location
     }
 

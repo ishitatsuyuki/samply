@@ -3,16 +3,16 @@ use std::path::Path;
 
 use debugid::DebugId;
 use samply_symbols::{
-    self, AddressInfo, Error, ExternalFileAddressInFileRef, ExternalFileAddressRef, FrameDebugInfo,
-    LibraryInfo, LookupAddress, MultiArchDisambiguator, SyncAddressInfo,
+    self, AddressInfo, Error, ExternalFileAddressInFileRef, ExternalFileAddressRef, FileLocation,
+    FrameDebugInfo, LibraryInfo, LookupAddress, MultiArchDisambiguator, SyncAddressInfo,
 };
 
 use crate::config::SymbolManagerConfig;
-use crate::helper::{FileReadOnlyHelper, Helper, WholesymFileContents, WholesymFileLocation};
+use crate::helper::{FileReadOnlyHelper, Helper, WholesymFileContents};
 
 /// Used in [`SymbolManager::load_external_file`] and returned by [`SymbolMap::symbol_file_origin`].
 #[derive(Debug, Clone)]
-pub struct SymbolFileOrigin(WholesymFileLocation);
+pub struct SymbolFileOrigin(FileLocation);
 
 /// Contains the symbols for a binary, and allows querying them by address and iterating over them.
 ///
@@ -202,7 +202,7 @@ impl SymbolManager {
         let path_str = path.to_str().map(ToOwned::to_owned);
         let binary_res = symbol_manager
             .load_binary_at_location(
-                WholesymFileLocation::LocalFile(path.to_owned()),
+                FileLocation::LocalFile(path.to_owned()),
                 name,
                 path_str,
                 disambiguator.clone(),

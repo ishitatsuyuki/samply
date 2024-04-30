@@ -17,7 +17,7 @@ use crate::symbol_map_object::{
 use crate::{debug_id_for_object, ElfBuildId};
 
 pub async fn load_symbol_map_for_elf<H: FileAndPathHelper>(
-    file_location: H::FL,
+    file_location: FileLocation,
     file_contents: FileContentsWrapper<H::F>,
     file_kind: FileKind,
     helper: Arc<H>,
@@ -73,7 +73,7 @@ pub async fn load_symbol_map_for_elf<H: FileAndPathHelper>(
 }
 
 async fn try_to_get_symbol_map_from_debug_link<'data, H, R>(
-    original_file_location: &H::FL,
+    original_file_location: &FileLocation,
     elf_file: &File<'data, R>,
     file_kind: FileKind,
     helper: &H,
@@ -108,8 +108,8 @@ where
 }
 
 async fn get_symbol_map_for_debug_link_candidate<H>(
-    original_file_location: &H::FL,
-    path: &H::FL,
+    original_file_location: &FileLocation,
+    path: &FileLocation,
     debug_id: DebugId,
     expected_crc: u32,
     file_kind: FileKind,
@@ -252,7 +252,7 @@ fn compute_debug_link_crc_of_file_contents<T: FileContents>(
 }
 
 async fn try_to_load_supplementary_file<'data, H, F, R>(
-    original_file_location: &H::FL,
+    original_file_location: &FileLocation,
     elf_file: &File<'data, R>,
     helper: &H,
 ) -> Option<FileContentsWrapper<F>>
@@ -292,7 +292,7 @@ where
 fn try_get_symbol_map_from_mini_debug_info<'data, R: ReadRef<'data>, H: FileAndPathHelper>(
     elf_file: &File<'data, R>,
     file_kind: FileKind,
-    debug_file_location: &H::FL,
+    debug_file_location: &FileLocation,
 ) -> Option<SymbolMap<H>> {
     let debugdata = elf_file.section_by_name(".gnu_debugdata")?;
     let data = debugdata.data().ok()?;

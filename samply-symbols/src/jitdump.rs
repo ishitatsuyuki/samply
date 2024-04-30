@@ -19,7 +19,7 @@ use crate::shared::{
     LookupAddress, SourceFilePath, SymbolInfo,
 };
 use crate::symbol_map::{GetInnerSymbolMap, SymbolMap, SymbolMapTrait};
-use crate::{FileAndPathHelper, SyncAddressInfo};
+use crate::{FileAndPathHelper, FileLocation, SyncAddressInfo};
 
 pub fn is_jitdump_file<T: FileContents>(file_contents: &FileContentsWrapper<T>) -> bool {
     const MAGIC_BYTES_BE: &[u8] = b"JiTD";
@@ -165,7 +165,7 @@ pub struct JitDumpIndexEntry {
 
 pub fn get_symbol_map_for_jitdump<H: FileAndPathHelper>(
     file_contents: FileContentsWrapper<H::F>,
-    file_location: H::FL,
+    file_location: FileLocation,
 ) -> Result<SymbolMap<H>, Error> {
     let outer = JitDumpSymbolMapOuter::new(file_contents)?;
     let symbol_map = JitDumpSymbolMap(Yoke::attach_to_cart(Box::new(outer), |outer| {
