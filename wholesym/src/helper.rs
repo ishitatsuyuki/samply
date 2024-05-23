@@ -617,7 +617,7 @@ impl FileAndPathHelper for Helper {
                 ));
             }
 
-            if debug_path.ends_with(".pdb") {
+            if debug_path.ends_with(".pdb") || debug_name.starts_with("[") {
                 // Get symbols from the pdb file.
                 paths.push(CandidatePathInfo::SingleFile(
                     WholesymFileLocation::LocalFile(debug_path.into()),
