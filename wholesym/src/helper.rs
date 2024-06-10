@@ -113,6 +113,14 @@ impl FileLocation for WholesymFileLocation {
                         .map(|base_path| Self::LocalFile(base_path.join(source_file_path)))
                 }
             }
+            Self::LocalBreakpadFile(..) => {
+                let source_file_path = Path::new(source_file_path);
+                if source_file_path.is_absolute() {
+                    Some(Self::LocalFile(source_file_path.to_owned()))
+                } else {
+                    None
+                }
+            }
             Self::DebuginfodDebugFile(_build_id) | Self::DebuginfodExecutable(_build_id) => {
                 // TODO: load source file via debuginfod
                 None
