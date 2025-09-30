@@ -645,7 +645,7 @@ impl FileAndPathHelper for Helper {
                 let mut build_id_20 = build_id.0.clone();
                 build_id_20.resize(20, 0);
                 let name_in_cache =
-                    format!("{}-{}", ElfBuildId::from_bytes(&build_id_20), binary_name);
+                    format!("{}/{}", ElfBuildId::from_bytes(&build_id_20), binary_name);
                 for dir in &self.config.simpleperf_binary_cache_directories {
                     let p = dir.join(&name_in_cache);
                     paths.push(CandidatePathInfo::SingleFile(
@@ -757,7 +757,7 @@ impl FileAndPathHelper for Helper {
             // Example: binary_cache/5e5c7b9cbc3e65b7c98a139fc1d3e0d000000000-libadreno_utils.so
             let mut build_id_20 = build_id.0.clone();
             build_id_20.resize(20, 0);
-            let name_in_cache = format!("{}-{}", ElfBuildId::from_bytes(&build_id_20), binary_name);
+            let name_in_cache = format!("{}/{}", ElfBuildId::from_bytes(&build_id_20), binary_name);
             for dir in &self.config.simpleperf_binary_cache_directories {
                 let p = dir.join(&name_in_cache);
                 paths.push(CandidatePathInfo::SingleFile(
