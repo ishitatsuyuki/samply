@@ -1295,8 +1295,6 @@ dependencies = [
 [[package]]
 name = "linux-perf-event-reader"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa8fc7e83909ea3b9e2784591655637d3401f2f16014f9d8d6e23ccd138e665f"
 dependencies = [
  "bitflags",
  "byteorder",

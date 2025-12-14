@@ -22,3 +22,6 @@ exclude = ["etw-reader"] # Should not be compiled on non-Windows
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[patch.crates-io]
+linux-perf-event-reader = { path = "../linux-perf-event-reader" }

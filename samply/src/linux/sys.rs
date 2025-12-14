@@ -49,6 +49,8 @@ pub const PERF_ATTR_FLAG_MMAP2: u64 = flag!(23);
 pub const PERF_ATTR_FLAG_COMM_EXEC: u64 = flag!(24);
 pub const PERF_ATTR_FLAG_USE_CLOCKID: u64 = flag!(25);
 pub const PERF_ATTR_FLAG_CONTEX_SWITCH: u64 = flag!(26);
+pub const PERF_ATTR_FLAG_DEFER_CALLCHAIN: u64 = flag!(38);
+pub const PERF_ATTR_FLAG_DEFER_OUTPUT: u64 = flag!(39);
 
 pub const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
 pub const PERF_COUNT_HW_REF_CPU_CYCLES: u64 = 9;
@@ -67,6 +69,9 @@ pub const PERF_RECORD_FORK: u32 = 7;
 pub const PERF_RECORD_SAMPLE: u32 = 9;
 pub const PERF_RECORD_MMAP2: u32 = 10;
 pub const PERF_RECORD_SWITCH: u32 = 14;
+pub const PERF_RECORD_CALLCHAIN_DEFERRED: u32 = 22;
+
+pub const PERF_CONTEXT_USER_DEFERRED: u64 = -640i64 as u64;
 
 pub const PERF_RECORD_MISC_SWITCH_OUT: u16 = 1 << 13;
 pub const PERF_RECORD_MISC_SWITCH_OUT_PREEMPT: u16 = 1 << 14;

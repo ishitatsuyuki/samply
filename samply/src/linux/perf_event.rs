@@ -163,6 +163,7 @@ pub struct PerfBuilder {
     enable_on_exec: bool,
     exclude_kernel: bool,
     gather_context_switches: bool,
+    defer_callchain: bool,
 }
 
 impl PerfBuilder {
@@ -224,6 +225,14 @@ impl PerfBuilder {
 
     pub fn gather_context_switches(mut self) -> Self {
         self.gather_context_switches = true;
+        self
+    }
+
+    /// Enable kernel-based user stack unwinding via deferred callchain.
+    /// This requires kernel support (CONFIG_UNWIND_USER) and will use the
+    /// kernel's unwinder instead of userspace DWARF unwinding.
+    pub fn defer_callchain(mut self) -> Self {
+        self.defer_callchain = true;
         self
     }
 
@@ -303,16 +312,24 @@ impl PerfBuilder {
             | PERF_SAMPLE_CPU
             | PERF_SAMPLE_PERIOD;
 
-        if reg_mask != 0 {
-            attr.sample_type |= PERF_SAMPLE_REGS_USER;
-        }
+        if self.defer_callchain {
+            // With deferred callchain, the kernel performs unwinding.
+            // We need CALLCHAIN for the kernel frames + cookie, but NOT
+            // STACK_USER or REGS_USER (those are for userspace DWARF unwinding).
+            attr.sample_type |= PERF_SAMPLE_CALLCHAIN;
+        } else {
+            // Traditional userspace DWARF unwinding mode
+            if reg_mask != 0 {
+                attr.sample_type |= PERF_SAMPLE_REGS_USER;
+            }
 
-        if stack_size != 0 {
-            attr.sample_type |= PERF_SAMPLE_STACK_USER;
-        }
+            if stack_size != 0 {
+                attr.sample_type |= PERF_SAMPLE_STACK_USER;
+            }
 
-        attr.sample_regs_user = reg_mask;
-        attr.sample_stack_user = stack_size;
+            attr.sample_regs_user = reg_mask;
+            attr.sample_stack_user = stack_size;
+        }
         attr.sample_period_or_freq = frequency;
         attr.clock_id = libc::CLOCK_MONOTONIC;
 
@@ -340,6 +357,10 @@ impl PerfBuilder {
 
         if gather_context_switches {
             attr.flags |= PERF_ATTR_FLAG_CONTEX_SWITCH;
+        }
+
+        if self.defer_callchain {
+            attr.flags |= PERF_ATTR_FLAG_DEFER_CALLCHAIN | PERF_ATTR_FLAG_DEFER_OUTPUT;
         }
 
         let fd = sys_perf_event_open(&attr, pid as pid_t, cpu as _, -1, PERF_FLAG_FD_CLOEXEC);
@@ -438,6 +459,7 @@ impl Perf {
             enable_on_exec: false,
             exclude_kernel: true,
             gather_context_switches: false,
+            defer_callchain: false,
         }
     }
 

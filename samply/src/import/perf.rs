@@ -257,6 +257,9 @@ where
                 };
                 converter.handle_context_switch(e, common);
             }
+            EventRecord::CallchainDeferred(e) => {
+                converter.handle_callchain_deferred(&e);
+            }
             _ => {
                 // println!("{:?}", record.record_type);
             }

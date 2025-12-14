@@ -18,10 +18,10 @@ use linux_perf_data::{
     linux_perf_event_reader, DsoInfo, DsoKey, Endianness, SimpleperfFileRecord, SimpleperfSymbol,
     SimpleperfTypeSpecificInfo,
 };
-use linux_perf_event_reader::constants::PERF_CONTEXT_MAX;
+use linux_perf_event_reader::constants::{PERF_CONTEXT_MAX, PERF_CONTEXT_USER_DEFERRED};
 use linux_perf_event_reader::{
-    CommOrExecRecord, CommonData, ContextSwitchRecord, ForkOrExitRecord, Mmap2FileId, Mmap2Record,
-    MmapRecord, RawDataU64, SampleRecord,
+    CallchainDeferredRecord, CommOrExecRecord, CommonData, ContextSwitchRecord, ForkOrExitRecord,
+    Mmap2FileId, Mmap2Record, MmapRecord, RawDataU64, SampleRecord,
 };
 use memmap2::Mmap;
 use object::{CompressedFileRange, CompressionFormat, Object, ObjectSection};
@@ -108,6 +108,22 @@ where
 
     /// Whether to emit context switch markers.
     should_emit_cswitch_markers: bool,
+
+    /// Samples waiting for their deferred callchain records.
+    /// Key is the cookie embedded in the sample's callchain.
+    pending_deferred_samples: HashMap<u64, Vec<PendingDeferredSample>>,
+}
+
+/// A sample that is waiting for its user stack frames from a
+/// PERF_RECORD_CALLCHAIN_DEFERRED record.
+struct PendingDeferredSample {
+    pid: i32,
+    tid: i32,
+    timestamp: u64,
+    cpu: Option<u32>,
+    period: Option<u64>,
+    /// Kernel stack frames collected from the sample's callchain.
+    kernel_frames: Vec<StackFrame>,
 }
 
 struct SimpleperfConverterData {
@@ -217,10 +233,16 @@ where
             call_chain_return_addresses_are_preadjusted,
             should_emit_jit_markers: profile_creation_props.should_emit_jit_markers,
             should_emit_cswitch_markers: profile_creation_props.should_emit_cswitch_markers,
+            pending_deferred_samples: HashMap::new(),
         }
     }
 
     pub fn finish(mut self) -> Profile {
+        // Process any pending deferred samples that never received their
+        // PERF_RECORD_CALLCHAIN_DEFERRED records (e.g., task killed, buffer overflow).
+        // Per user decision: emit with kernel-only stack rather than dropping.
+        self.flush_pending_deferred_samples();
+
         let mut profile = self.profile;
         self.simpleperf
             .jit_app_cache_library
@@ -232,6 +254,58 @@ where
             &self.timestamp_converter,
         );
         profile
+    }
+
+    /// Flush any pending deferred samples that never received their user frames.
+    /// These will be emitted with kernel-only stacks.
+    fn flush_pending_deferred_samples(&mut self) {
+        let pending_samples: Vec<_> = self
+            .pending_deferred_samples
+            .drain()
+            .flat_map(|(_, samples)| samples)
+            .collect();
+
+        for pending in pending_samples {
+            let pid = pending.pid;
+            let tid = pending.tid;
+            let timestamp = pending.timestamp;
+
+            if tid == 0 {
+                continue;
+            }
+
+            let stack = &mut self.stack_scratch;
+            stack.clear();
+            stack.extend(pending.kernel_frames.iter().cloned());
+
+            let profile_timestamp = self.timestamp_converter.convert_time(timestamp);
+            let process = self.processes.get_by_pid(pid, &mut self.profile);
+            let thread = process.threads.get_thread_by_tid(tid, &mut self.profile);
+
+            if thread.last_sample_timestamp == Some(timestamp) {
+                continue;
+            }
+
+            thread.last_sample_timestamp = Some(timestamp);
+            let thread_handle = thread.profile_thread;
+
+            let cpu_delta = if let Some(period) = pending.period {
+                CpuDelta::from_nanos(period)
+            } else {
+                CpuDelta::from_nanos(0)
+            };
+
+            let stack_index = self.unresolved_stacks.convert(stack.iter().rev().cloned());
+            process.unresolved_samples.add_sample(
+                thread_handle,
+                profile_timestamp,
+                timestamp,
+                stack_index,
+                cpu_delta,
+                1,
+                None,
+            );
+        }
     }
 
     pub fn set_profile_name(&mut self, profile_name: &str) {
@@ -267,7 +341,7 @@ where
         );
 
         let stack = &mut self.stack_scratch;
-        Self::get_sample_stack::<C>(
+        let deferred_cookie = Self::get_sample_stack::<C>(
             e,
             &process.unwinder,
             &mut self.cache,
@@ -275,6 +349,24 @@ where
             self.fold_recursive_prefix,
             self.call_chain_return_addresses_are_preadjusted,
         );
+
+        // If this sample uses deferred callchain, store it and wait for the
+        // PERF_RECORD_CALLCHAIN_DEFERRED record to arrive with user frames.
+        if let Some(cookie) = deferred_cookie {
+            let pending = PendingDeferredSample {
+                pid,
+                tid,
+                timestamp,
+                cpu: e.cpu,
+                period: e.period,
+                kernel_frames: stack.clone(),
+            };
+            self.pending_deferred_samples
+                .entry(cookie)
+                .or_default()
+                .push(pending);
+            return;
+        }
 
         let thread = process.threads.get_thread_by_tid(tid, &mut self.profile);
 
@@ -384,6 +476,161 @@ where
         }
     }
 
+    /// Handle a PERF_RECORD_CALLCHAIN_DEFERRED record that contains user-space
+    /// stack frames for samples that were recorded with deferred callchain mode.
+    pub fn handle_callchain_deferred(&mut self, e: &CallchainDeferredRecord) {
+        let cookie = e.cookie;
+        let Some(pending_samples) = self.pending_deferred_samples.remove(&cookie) else {
+            // No pending samples for this cookie - may have been evicted or lost.
+            return;
+        };
+
+        for pending in pending_samples {
+            // Build the complete stack: kernel frames + user frames
+            let stack = &mut self.stack_scratch;
+            stack.clear();
+            stack.extend(pending.kernel_frames.iter().cloned());
+
+            // Add user frames from the deferred record.
+            // The first user IP is the instruction pointer, rest are return addresses.
+            let mut is_first = stack.is_empty();
+            for &ip in &e.ips {
+                let frame = if is_first {
+                    StackFrame::InstructionPointer(ip, StackMode::User)
+                } else {
+                    StackFrame::ReturnAddress(ip, StackMode::User)
+                };
+                stack.push(frame);
+                is_first = false;
+            }
+
+            // Now process this sample the same way as a regular sample.
+            let pid = pending.pid;
+            let tid = pending.tid;
+            let timestamp = pending.timestamp;
+
+            if tid == 0 {
+                continue;
+            }
+
+            let profile_timestamp = self.timestamp_converter.convert_time(timestamp);
+            let process = self.processes.get_by_pid(pid, &mut self.profile);
+            let thread = process.threads.get_thread_by_tid(tid, &mut self.profile);
+
+            if thread.last_sample_timestamp == Some(timestamp) {
+                // Duplicate sample. Ignore.
+                continue;
+            }
+
+            thread.last_sample_timestamp = Some(timestamp);
+            let thread_handle = thread.profile_thread;
+
+            // Consume off-cpu time and clear any saved off-CPU stack.
+            let off_cpu_sample = self
+                .context_switch_handler
+                .handle_on_cpu_sample(timestamp, &mut thread.context_switch_data);
+            if let (Some(off_cpu_sample), Some(off_cpu_stack)) =
+                (off_cpu_sample, thread.off_cpu_stack.take())
+            {
+                let cpu_delta_ns = self
+                    .context_switch_handler
+                    .consume_cpu_delta(&mut thread.context_switch_data);
+                process_off_cpu_sample_group(
+                    off_cpu_sample,
+                    thread_handle,
+                    cpu_delta_ns,
+                    &self.timestamp_converter,
+                    self.off_cpu_weight_per_sample,
+                    off_cpu_stack,
+                    &mut process.unresolved_samples,
+                );
+            }
+
+            let cpu_delta = if self.off_cpu_indicator.is_some() {
+                CpuDelta::from_nanos(
+                    self.context_switch_handler
+                        .consume_cpu_delta(&mut thread.context_switch_data),
+                )
+            } else if let Some(period) = pending.period {
+                CpuDelta::from_nanos(period)
+            } else {
+                CpuDelta::from_nanos(0)
+            };
+
+            let stack_index = self.unresolved_stacks.convert(stack.iter().rev().cloned());
+            process.unresolved_samples.add_sample(
+                thread_handle,
+                profile_timestamp,
+                timestamp,
+                stack_index,
+                cpu_delta,
+                1,
+                None,
+            );
+
+            // Handle per-CPU thread if enabled
+            if let (Some(cpu_index), Some(cpus)) = (pending.cpu, &mut self.cpus) {
+                let cpu = cpus.get_mut(cpu_index as usize, &mut self.profile);
+                let cpu_thread_handle = cpu.thread_handle;
+
+                let idle_sample = self
+                    .context_switch_handler
+                    .handle_on_cpu_sample(timestamp, &mut cpu.context_switch_data);
+                if let Some(idle_sample) = idle_sample {
+                    let cpu_delta_ns = self
+                        .context_switch_handler
+                        .consume_cpu_delta(&mut cpu.context_switch_data);
+                    process_off_cpu_sample_group(
+                        idle_sample,
+                        cpu_thread_handle,
+                        cpu_delta_ns,
+                        &self.timestamp_converter,
+                        self.off_cpu_weight_per_sample,
+                        UnresolvedStackHandle::EMPTY,
+                        &mut process.unresolved_samples,
+                    );
+                }
+
+                let cpu_delta = CpuDelta::from_nanos(
+                    self.context_switch_handler
+                        .consume_cpu_delta(&mut cpu.context_switch_data),
+                );
+
+                let label_frame = self.profile.handle_for_frame_with_label(
+                    cpu_thread_handle,
+                    thread.thread_label,
+                    CategoryHandle::OTHER,
+                    FrameFlags::empty(),
+                );
+                process.unresolved_samples.add_sample(
+                    cpu_thread_handle,
+                    profile_timestamp,
+                    timestamp,
+                    stack_index,
+                    cpu_delta,
+                    1,
+                    Some(label_frame),
+                );
+
+                let label_frame = self.profile.handle_for_frame_with_label(
+                    cpus.combined_thread_handle(),
+                    thread.thread_label,
+                    CategoryHandle::OTHER,
+                    FrameFlags::empty(),
+                );
+                process.unresolved_samples.add_sample(
+                    cpus.combined_thread_handle(),
+                    profile_timestamp,
+                    timestamp,
+                    stack_index,
+                    CpuDelta::ZERO,
+                    1,
+                    Some(label_frame),
+                );
+            }
+        }
+    }
+
     pub fn handle_sched_switch_sample<C: ConvertRegs<UnwindRegs = U::UnwindRegs>>(
         &mut self,
         e: &SampleRecord,
@@ -398,7 +645,8 @@ where
         );
 
         let stack = &mut self.stack_scratch;
-        Self::get_sample_stack::<C>(
+        // Ignore the deferred cookie for sched_switch samples - they should use traditional unwinding
+        let _ = Self::get_sample_stack::<C>(
             e,
             &process.unwinder,
             &mut self.cache,
@@ -616,6 +864,14 @@ where
     ///    bytes on the stack are just copied into the perf.data file, and we
     ///    need to do the unwinding now, based on the register values in
     ///    `e.user_regs` and the raw stack bytes in `e.user_stack`.
+    ///  - With deferred callchain (`perf record` with defer_callchain), the
+    ///    kernel frames are captured at sample time, but user frames arrive
+    ///    later in a separate PERF_RECORD_CALLCHAIN_DEFERRED record. In this
+    ///    case, the function returns Some(cookie) and only kernel frames are
+    ///    in the stack.
+    ///
+    /// Returns `Some(cookie)` if this sample uses deferred callchain and needs
+    /// to wait for a PERF_RECORD_CALLCHAIN_DEFERRED record.
     fn get_sample_stack<C: ConvertRegs<UnwindRegs = U::UnwindRegs>>(
         e: &SampleRecord,
         unwinder: &U,
@@ -623,21 +879,36 @@ where
         stack: &mut Vec<StackFrame>,
         fold_recursive_prefix: bool,
         call_chain_return_addresses_are_preadjusted: bool,
-    ) {
+    ) -> Option<u64> {
         stack.truncate(0);
 
         // CpuMode::from_misc(e.raw.misc)
 
         // Get the first fragment of the stack from e.callchain.
+        // Check for PERF_CONTEXT_USER_DEFERRED which indicates deferred callchain mode.
+        let mut deferred_cookie = None;
         if let Some(callchain) = e.callchain {
             let mut is_first_frame = true;
             let mut mode = StackMode::from(e.cpu_mode);
-            for i in 0..callchain.len() {
+            let mut i = 0;
+            while i < callchain.len() {
                 let address = callchain.get(i).unwrap();
+
+                // Check for deferred callchain marker
+                if address == PERF_CONTEXT_USER_DEFERRED {
+                    // The next entry is the cookie
+                    if i + 1 < callchain.len() {
+                        deferred_cookie = Some(callchain.get(i + 1).unwrap());
+                    }
+                    // Stop processing - user frames will come in a separate record
+                    break;
+                }
+
                 if address >= PERF_CONTEXT_MAX {
                     if let Some(new_mode) = StackMode::from_context_frame(address) {
                         mode = new_mode;
                     }
+                    i += 1;
                     continue;
                 }
 
@@ -650,7 +921,14 @@ where
                 stack.push(stack_frame);
 
                 is_first_frame = false;
+                i += 1;
             }
+        }
+
+        // If we have a deferred cookie, don't do DWARF unwinding - user frames
+        // will come from the deferred callchain record.
+        if deferred_cookie.is_some() {
+            return deferred_cookie;
         }
 
         // Append the user stack with the help of DWARF unwinding.
@@ -697,6 +975,8 @@ where
                 stack.pop();
             }
         }
+
+        None
     }
 
     pub fn handle_mmap(&mut self, e: MmapRecord, timestamp: u64) {
