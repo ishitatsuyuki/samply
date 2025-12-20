@@ -10,6 +10,22 @@ use super::lib_mappings::{AndroidArtInfo, LibMappingsHierarchy};
 use super::stack_cache::FrameAddressInfo;
 use super::types::{StackFrame, StackMode};
 
+/// Normalize a StackFrame to address info for cache lookup.
+/// Returns None for TruncatedStackMarker frames.
+pub fn normalize_frame(frame: StackFrame) -> Option<FrameAddressInfo> {
+    let (mode, lookup_address, from_ip) = match frame {
+        StackFrame::InstructionPointer(addr, mode) => (mode, addr, true),
+        StackFrame::ReturnAddress(addr, mode) => (mode, addr.saturating_sub(1), false),
+        StackFrame::AdjustedReturnAddress(addr, mode) => (mode, addr, false),
+        StackFrame::TruncatedStackMarker => return None,
+    };
+    Some(FrameAddressInfo {
+        lookup_address,
+        stack_mode: mode,
+        from_ip,
+    })
+}
+
 #[derive(Debug)]
 pub struct StackConverter {
     user_category: SubcategoryHandle,
@@ -213,6 +229,26 @@ pub struct ConvertedFrame {
     pub address_info: Option<FrameAddressInfo>,
 }
 
+/// Result from processing a single frame. May produce 0, 1, or 2 frames.
+/// This is used for the cache-first path where we process frames individually.
+pub enum ProcessedFrameResult {
+    /// Normal frame: single FrameHandle
+    Single(FrameHandle),
+    /// JS frame insertion: two FrameHandles (JS label first, then native)
+    WithJsLabel(FrameHandle, FrameHandle),
+}
+
+impl ProcessedFrameResult {
+    /// Returns an iterator over the frame handles in order (JS label first if present).
+    pub fn frames(&self) -> impl Iterator<Item = FrameHandle> + '_ {
+        let (first, second) = match self {
+            ProcessedFrameResult::Single(frame) => (Some(*frame), None),
+            ProcessedFrameResult::WithJsLabel(js_label, native) => (Some(*js_label), Some(*native)),
+        };
+        first.into_iter().chain(second)
+    }
+}
+
 impl<I: Iterator<Item = SecondPassFrameInfo>> ConvertedStackIterD<I> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         // Use the slice length as the size hint. This is a bit of a lie, unfortunately.
@@ -307,6 +343,103 @@ impl StackConverter {
             user_category,
             kernel_category,
             libart_frame_buffer: VecDeque::new(),
+        }
+    }
+
+    /// Process a single frame through lib lookup and frame creation.
+    /// This is used for the cache-first path where we process frames individually on cache miss.
+    ///
+    /// The `js_name_for_baseline_interpreter` parameter is used to track state across frames
+    /// for SpiderMonkey's BaselineInterpreter OSR case. It should be passed as mutable and
+    /// will be updated during processing.
+    pub fn process_single_frame(
+        &self,
+        address_info: FrameAddressInfo,
+        lib_mappings: &LibMappingsHierarchy,
+        profile: &mut Profile,
+        thread: ThreadHandle,
+        js_name_for_baseline_interpreter: &mut Option<JsName>,
+    ) -> ProcessedFrameResult {
+        let FrameAddressInfo {
+            lookup_address,
+            stack_mode: mode,
+            from_ip,
+        } = address_info;
+
+        // Step 1: Convert address to frame location and metadata
+        let (location, category, js_frame) = match mode {
+            StackMode::User => match lib_mappings.convert_address(lookup_address) {
+                Some((relative_lookup_address, info)) => {
+                    let location = if from_ip {
+                        FrameAddress::RelativeAddressFromInstructionPointer(
+                            info.lib_handle,
+                            relative_lookup_address,
+                        )
+                    } else {
+                        FrameAddress::RelativeAddressFromAdjustedReturnAddress(
+                            info.lib_handle,
+                            relative_lookup_address,
+                        )
+                    };
+                    (
+                        location,
+                        info.category.unwrap_or(self.user_category),
+                        info.js_frame,
+                    )
+                }
+                None => {
+                    let location = match from_ip {
+                        true => FrameAddress::InstructionPointer(lookup_address),
+                        false => FrameAddress::AdjustedReturnAddress(lookup_address),
+                    };
+                    (location, self.user_category, None)
+                }
+            },
+            StackMode::Kernel => {
+                let location = match from_ip {
+                    true => FrameAddress::InstructionPointer(lookup_address),
+                    false => FrameAddress::AdjustedReturnAddress(lookup_address),
+                };
+                (location, self.kernel_category, None)
+            }
+        };
+
+        // Step 2: Handle JS frame logic
+        let mut frame_flags = FrameFlags::empty();
+        let extra_js_name = match js_frame {
+            Some(JsFrame::NativeFrameIsJs) => {
+                frame_flags |= FrameFlags::IS_JS;
+                None
+            }
+            Some(JsFrame::RegularInAdditionToNativeFrame(js_name)) => {
+                // Remember the name for a potentially upcoming unnamed BaselineInterpreter frame.
+                *js_name_for_baseline_interpreter = Some(js_name);
+                Some(js_name)
+            }
+            Some(JsFrame::BaselineInterpreterStub(js_name)) => {
+                // Discard the name of an ancestor JS function.
+                *js_name_for_baseline_interpreter = None;
+                Some(js_name)
+            }
+            Some(JsFrame::BaselineInterpreter) => js_name_for_baseline_interpreter.take(),
+            None => None,
+        };
+
+        // Step 3: Create the frame handle
+        let frame_handle =
+            profile.handle_for_frame_with_address(thread, location, category, frame_flags);
+
+        // Step 4: If there's an extra JS name, create a prepended JS frame
+        if let Some(JsName::NonSelfHosted(js_name)) = extra_js_name {
+            let js_label_frame = profile.handle_for_frame_with_label(
+                thread,
+                js_name,
+                category,
+                FrameFlags::IS_JS,
+            );
+            ProcessedFrameResult::WithJsLabel(js_label_frame, frame_handle)
+        } else {
+            ProcessedFrameResult::Single(frame_handle)
         }
     }
 

@@ -11,7 +11,7 @@ use super::stack_converter::{ConvertedFrame, ConvertedStackIter};
 ///   3. ~avg N frames at the end which are kept.
 ///
 /// The third piece is m frames, and k is chosen such that 0.5 * N <= m < 1.5 * N
-fn should_elide_frames<const N: usize>(full_len: usize) -> Option<(usize, usize)> {
+pub fn should_elide_frames<const N: usize>(full_len: usize) -> Option<(usize, usize)> {
     if full_len >= N + N + N / 2 {
         let elided_count = (full_len - N - N / 2) / N * N;
         Some((N, elided_count))

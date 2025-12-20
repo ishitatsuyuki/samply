@@ -3,10 +3,11 @@ use fxprof_processed_profile::{
     SubcategoryHandle, ThreadHandle, Timestamp,
 };
 
+use super::jit_category_manager::JsName;
 use super::lib_mappings::{LibMappingInfo, LibMappingOpQueue, LibMappingsHierarchy};
 use super::stack_cache::{StackCache, StackCacheKey};
-use super::stack_converter::StackConverter;
-use super::stack_depth_limiting_frame_iter::StackDepthLimitingFrameIter;
+use super::stack_converter::{normalize_frame, StackConverter};
+use super::stack_depth_limiting_frame_iter::{should_elide_frames, StackDepthLimitingFrameIter};
 use super::types::{FastHashMap, StackFrame};
 use super::unresolved_samples::{
     SampleData, SampleOrMarker, UnresolvedSampleOrMarker, UnresolvedSamples, UnresolvedStacks,
@@ -104,51 +105,113 @@ impl ProcessSampleData {
 
             stack_frame_scratch_buf.clear();
             stacks.convert_back(stack, stack_frame_scratch_buf);
-            let frames = stack_converter.convert_stack(
-                thread_handle,
-                stack_frame_scratch_buf,
-                &lib_mappings_hierarchy,
-                extra_label_frame,
-            );
-            let mut frames =
-                StackDepthLimitingFrameIter::new(profile, frames, thread_handle, user_category);
 
-            // Build stack with caching
+            // Get the cache for this thread
             let cache = stack_caches
                 .entry(thread_handle)
                 .or_insert_with(StackCache::default);
-            let mut parent_stack_index: Option<usize> = None;
 
-            while let Some(converted_frame) = frames.next(profile) {
-                let frame_handle = converted_frame.frame_handle;
+            // Determine which path to use:
+            // - Slow path: When ART mappings are present (need LibartFilteringIter)
+            //              OR when stack needs elision (too deep)
+            // - Fast path: Check cache BEFORE expensive work
+            let stack_len = stack_frame_scratch_buf.len();
+            let needs_elision = should_elide_frames::<200>(stack_len).is_some();
+            let has_art = lib_mappings_hierarchy.has_art_mappings();
 
-                // Try to use cache if we have address info
-                if let Some(address_info) = converted_frame.address_info {
+            let parent_stack_index = if has_art || needs_elision || extra_label_frame.is_some() {
+                // Slow path: use existing iterator chain
+                // This handles ART filtering, stack depth limiting, and extra label frames
+                let frames = stack_converter.convert_stack(
+                    thread_handle,
+                    stack_frame_scratch_buf,
+                    &lib_mappings_hierarchy,
+                    extra_label_frame,
+                );
+                let mut frames =
+                    StackDepthLimitingFrameIter::new(profile, frames, thread_handle, user_category);
+
+                let mut parent_stack_index: Option<usize> = None;
+
+                while let Some(converted_frame) = frames.next(profile) {
+                    let frame_handle = converted_frame.frame_handle;
+
+                    // Try to use cache if we have address info
+                    if let Some(address_info) = converted_frame.address_info {
+                        let cache_key = StackCacheKey::new(address_info, parent_stack_index);
+                        if let Some(cached_stack_index) = cache.get(&cache_key) {
+                            parent_stack_index = Some(cached_stack_index);
+                            continue;
+                        }
+
+                        // Cache miss - build stack and cache the result
+                        let stack_handle = profile.handle_for_stack(
+                            thread_handle,
+                            frame_handle,
+                            parent_stack_index.map(|i| StackHandle::from_parts(thread_handle, i)),
+                        );
+                        let new_stack_index = stack_handle.stack_index();
+                        cache.insert(cache_key, new_stack_index);
+                        parent_stack_index = Some(new_stack_index);
+                    } else {
+                        // No address info (synthetic frame) - can't cache
+                        let stack_handle = profile.handle_for_stack(
+                            thread_handle,
+                            frame_handle,
+                            parent_stack_index.map(|i| StackHandle::from_parts(thread_handle, i)),
+                        );
+                        parent_stack_index = Some(stack_handle.stack_index());
+                    }
+                }
+
+                parent_stack_index
+            } else {
+                // Fast path: Check cache BEFORE expensive work
+                // This avoids lib lookup and frame creation when we have a cache hit
+                let mut parent_stack_index: Option<usize> = None;
+                let mut js_name_for_baseline_interpreter: Option<JsName> = None;
+
+                // Process frames root-to-leaf (reverse iteration)
+                for &raw_frame in stack_frame_scratch_buf.iter().rev() {
+                    let Some(address_info) = normalize_frame(raw_frame) else {
+                        continue; // Skip TruncatedStackMarker
+                    };
+
                     let cache_key = StackCacheKey::new(address_info, parent_stack_index);
+
+                    // Fast path: cache hit - skip expensive work entirely
                     if let Some(cached_stack_index) = cache.get(&cache_key) {
                         parent_stack_index = Some(cached_stack_index);
                         continue;
                     }
 
-                    // Cache miss - build stack and cache the result
-                    let stack_handle = profile.handle_for_stack(
+                    // Slow path: cache miss - do expensive processing
+                    let frame_result = stack_converter.process_single_frame(
+                        address_info,
+                        &lib_mappings_hierarchy,
+                        profile,
                         thread_handle,
-                        frame_handle,
-                        parent_stack_index.map(|i| StackHandle::from_parts(thread_handle, i)),
+                        &mut js_name_for_baseline_interpreter,
                     );
-                    let new_stack_index = stack_handle.stack_index();
-                    cache.insert(cache_key, new_stack_index);
-                    parent_stack_index = Some(new_stack_index);
-                } else {
-                    // No address info (synthetic frame) - can't cache
-                    let stack_handle = profile.handle_for_stack(
-                        thread_handle,
-                        frame_handle,
-                        parent_stack_index.map(|i| StackHandle::from_parts(thread_handle, i)),
-                    );
-                    parent_stack_index = Some(stack_handle.stack_index());
+
+                    // Handle result (may be 1 or 2 frames for JS label insertion)
+                    for frame_handle in frame_result.frames() {
+                        let stack_handle = profile.handle_for_stack(
+                            thread_handle,
+                            frame_handle,
+                            parent_stack_index.map(|i| StackHandle::from_parts(thread_handle, i)),
+                        );
+                        parent_stack_index = Some(stack_handle.stack_index());
+                    }
+
+                    // Cache the final result for this address (after any JS label frames)
+                    if let Some(idx) = parent_stack_index {
+                        cache.insert(cache_key, idx);
+                    }
                 }
-            }
+
+                parent_stack_index
+            };
 
             let stack_handle =
                 parent_stack_index.map(|i| StackHandle::from_parts(thread_handle, i));

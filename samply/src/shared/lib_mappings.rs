@@ -82,6 +82,9 @@ pub struct LibMappingsHierarchy {
     regular_libs: (LibMappings<LibMappingInfo>, LibMappingOpQueueIter),
     jitdumps: Vec<(LibMappings<LibMappingInfo>, LibMappingOpQueueIter)>,
     perf_map: Option<LibMappings<LibMappingInfo>>,
+    /// Set to true if any ART-related mappings (libart.so or Java frames) have been added.
+    /// When true, the slow path with LibartFilteringIter must be used.
+    has_art_mappings: bool,
 }
 
 impl LibMappingsHierarchy {
@@ -90,7 +93,14 @@ impl LibMappingsHierarchy {
             regular_libs: (LibMappings::default(), regular_lib_mappings_ops.into_iter()),
             jitdumps: Vec::new(),
             perf_map: None,
+            has_art_mappings: false,
         }
+    }
+
+    /// Returns true if any ART-related mappings have been added.
+    /// When true, the slow path with LibartFilteringIter must be used.
+    pub fn has_art_mappings(&self) -> bool {
+        self.has_art_mappings
     }
 
     pub fn add_jitdump_lib_mappings_ops(&mut self, lib_mappings_ops: LibMappingOpQueue) {
@@ -107,11 +117,17 @@ impl LibMappingsHierarchy {
     pub fn process_ops(&mut self, timestamp: u64) -> bool {
         let mut changed = false;
         while let Some(op) = self.regular_libs.1.next_op_if_at_or_before(timestamp) {
+            if op.has_art_info() {
+                self.has_art_mappings = true;
+            }
             op.apply_to(&mut self.regular_libs.0);
             changed = true;
         }
         for (mappings, ops) in &mut self.jitdumps {
             while let Some(op) = ops.next_op_if_at_or_before(timestamp) {
+                if op.has_art_info() {
+                    self.has_art_mappings = true;
+                }
                 op.apply_to(mappings);
                 changed = true;
             }
@@ -177,6 +193,14 @@ pub enum LibMappingOp {
 }
 
 impl LibMappingOp {
+    /// Returns true if this operation adds a mapping with ART-related info.
+    pub fn has_art_info(&self) -> bool {
+        match self {
+            LibMappingOp::Add(add) => add.info.art_info.is_some(),
+            _ => false,
+        }
+    }
+
     pub fn apply_to(self, lib_mappings: &mut LibMappings<LibMappingInfo>) {
         match self {
             LibMappingOp::Add(op) => {
