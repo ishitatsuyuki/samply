@@ -91,9 +91,32 @@ impl From<Duration> for SamplingInterval {
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct FrameHandle(ThreadHandle, usize);
 
+impl FrameHandle {
+    /// Returns the frame index within the thread's frame table.
+    #[inline]
+    pub fn frame_index(&self) -> usize {
+        self.1
+    }
+}
+
 /// A handle to a stack, specific to a thread. Can be created with [`Profile::handle_for_stack`](crate::Profile::handle_for_stack).
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct StackHandle(ThreadHandle, usize);
+
+impl StackHandle {
+    /// Returns the stack index within the thread's stack table.
+    #[inline]
+    pub fn stack_index(&self) -> usize {
+        self.1
+    }
+
+    /// Creates a StackHandle from a thread handle and stack index.
+    /// This is useful for reconstructing a StackHandle from cached data.
+    #[inline]
+    pub fn from_parts(thread: ThreadHandle, stack_index: usize) -> Self {
+        Self(thread, stack_index)
+    }
+}
 
 /// Symbol information about a frame address.
 ///

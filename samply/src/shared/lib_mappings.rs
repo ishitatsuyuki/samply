@@ -102,15 +102,21 @@ impl LibMappingsHierarchy {
         self.perf_map = Some(mappings);
     }
 
-    pub fn process_ops(&mut self, timestamp: u64) {
+    /// Process pending library mapping operations up to the given timestamp.
+    /// Returns true if any operations were applied (library mappings changed).
+    pub fn process_ops(&mut self, timestamp: u64) -> bool {
+        let mut changed = false;
         while let Some(op) = self.regular_libs.1.next_op_if_at_or_before(timestamp) {
             op.apply_to(&mut self.regular_libs.0);
+            changed = true;
         }
         for (mappings, ops) in &mut self.jitdumps {
             while let Some(op) = ops.next_op_if_at_or_before(timestamp) {
                 op.apply_to(mappings);
+                changed = true;
             }
         }
+        changed
     }
 
     pub fn convert_address(&self, address: u64) -> Option<(u32, &LibMappingInfo)> {

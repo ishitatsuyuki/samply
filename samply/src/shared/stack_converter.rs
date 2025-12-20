@@ -7,6 +7,7 @@ use fxprof_processed_profile::{
 
 use super::jit_category_manager::{JsFrame, JsName};
 use super::lib_mappings::{AndroidArtInfo, LibMappingsHierarchy};
+use super::stack_cache::FrameAddressInfo;
 use super::types::{StackFrame, StackMode};
 
 #[derive(Debug)]
@@ -28,6 +29,8 @@ struct SecondPassFrameInfo {
     category: SubcategoryHandle,
     js_frame: Option<JsFrame>,
     art_info: Option<AndroidArtInfo>,
+    /// Address info for cache key construction.
+    address_info: FrameAddressInfo,
 }
 
 struct FirstPassIter<I: Iterator<Item = StackFrame>>(I);
@@ -100,6 +103,14 @@ impl<I: Iterator<Item = FirstPassFrameInfo>> Iterator for SecondPassIter<'_, I> 
             lookup_address,
             from_ip,
         } = self.inner.next()?;
+
+        // Capture address info for caching before any transformation.
+        let address_info = FrameAddressInfo {
+            lookup_address,
+            stack_mode: mode,
+            from_ip,
+        };
+
         let (location, category, js_frame, art_info) = match mode {
             StackMode::User => match self.lib_mappings.convert_address(lookup_address) {
                 Some((relative_lookup_address, info)) => {
@@ -143,6 +154,7 @@ impl<I: Iterator<Item = FirstPassFrameInfo>> Iterator for SecondPassIter<'_, I> 
             category,
             js_frame,
             art_info,
+            address_info,
         })
     }
 }
@@ -193,6 +205,14 @@ impl<I: Iterator<Item = SecondPassFrameInfo>> Iterator for LibartFilteringIter<'
     }
 }
 
+/// Result from ConvertedStackIterD::next, containing the frame handle and optional address info.
+/// The address_info is None for synthetic JS label frames that are inserted for SpiderMonkey.
+pub struct ConvertedFrame {
+    pub frame_handle: FrameHandle,
+    /// Address info for cache key construction. None for synthetic JS frames.
+    pub address_info: Option<FrameAddressInfo>,
+}
+
 impl<I: Iterator<Item = SecondPassFrameInfo>> ConvertedStackIterD<I> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         // Use the slice length as the size hint. This is a bit of a lie, unfortunately.
@@ -202,14 +222,19 @@ impl<I: Iterator<Item = SecondPassFrameInfo>> ConvertedStackIterD<I> {
         self.inner.size_hint()
     }
 
-    fn next(&mut self, profile: &mut Profile) -> Option<FrameHandle> {
+    fn next(&mut self, profile: &mut Profile) -> Option<ConvertedFrame> {
         if let Some(pending_frame_handle) = self.pending_frame_handle.take() {
-            return Some(pending_frame_handle);
+            // This is a synthetic JS label frame - no address info for caching.
+            return Some(ConvertedFrame {
+                frame_handle: pending_frame_handle,
+                address_info: None,
+            });
         }
         let SecondPassFrameInfo {
             location,
             category,
             js_frame,
+            address_info,
             ..
         } = self.inner.next()?;
 
@@ -259,7 +284,10 @@ impl<I: Iterator<Item = SecondPassFrameInfo>> ConvertedStackIterD<I> {
             self.pending_frame_handle = Some(buffered_frame);
         };
 
-        Some(frame_handle)
+        Some(ConvertedFrame {
+            frame_handle,
+            address_info: Some(address_info),
+        })
     }
 }
 
@@ -268,7 +296,7 @@ impl ConvertedStackIter<'_> {
         self.0.size_hint()
     }
 
-    pub fn next(&mut self, profile: &mut Profile) -> Option<FrameHandle> {
+    pub fn next(&mut self, profile: &mut Profile) -> Option<ConvertedFrame> {
         self.0.next(profile)
     }
 }

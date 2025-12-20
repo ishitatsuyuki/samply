@@ -1,6 +1,6 @@
 use fxprof_processed_profile::{FrameFlags, FrameHandle, Profile, SubcategoryHandle, ThreadHandle};
 
-use super::stack_converter::ConvertedStackIter;
+use super::stack_converter::{ConvertedFrame, ConvertedStackIter};
 
 /// Returns `Some((start_index, count))` if part of the stack should be elided
 /// in order to limit the stack length to < 2.5 * N.
@@ -94,7 +94,7 @@ impl<'a> StackDepthLimitingFrameIter<'a> {
 }
 
 impl StackDepthLimitingFrameIter<'_> {
-    pub fn next(&mut self, profile: &mut Profile) -> Option<FrameHandle> {
+    pub fn next(&mut self, profile: &mut Profile) -> Option<ConvertedFrame> {
         let frame = match &mut self.state {
             StackDepthLimitingFrameIterState::BeforeElidedPiece {
                 index,
@@ -124,7 +124,11 @@ impl StackDepthLimitingFrameIter<'_> {
                 self.state = StackDepthLimitingFrameIterState::NoMoreElision {
                     index: *first_frame_after_elision,
                 };
-                return Some(frame_handle);
+                // Elision frame is synthetic - no address info for caching.
+                return Some(ConvertedFrame {
+                    frame_handle,
+                    address_info: None,
+                });
             }
             StackDepthLimitingFrameIterState::NoMoreElision { index } => {
                 let frame = self.inner.next(profile)?;

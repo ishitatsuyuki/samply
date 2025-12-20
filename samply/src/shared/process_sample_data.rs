@@ -1,12 +1,13 @@
 use fxprof_processed_profile::{
-    LibMappings, Marker, MarkerField, MarkerTiming, Profile, Schema, StringHandle,
+    LibMappings, Marker, MarkerField, MarkerTiming, Profile, Schema, StackHandle, StringHandle,
     SubcategoryHandle, ThreadHandle, Timestamp,
 };
 
 use super::lib_mappings::{LibMappingInfo, LibMappingOpQueue, LibMappingsHierarchy};
+use super::stack_cache::{StackCache, StackCacheKey};
 use super::stack_converter::StackConverter;
 use super::stack_depth_limiting_frame_iter::StackDepthLimitingFrameIter;
-use super::types::StackFrame;
+use super::types::{FastHashMap, StackFrame};
 use super::unresolved_samples::{
     SampleData, SampleOrMarker, UnresolvedSampleOrMarker, UnresolvedSamples, UnresolvedStacks,
 };
@@ -82,8 +83,16 @@ impl ProcessSampleData {
         }
         let mut stack_converter = StackConverter::new(user_category, kernel_category);
         let samples = unresolved_samples.into_inner();
+
+        // Per-thread stack caches for fast path lookups
+        let mut stack_caches: FastHashMap<ThreadHandle, StackCache> = FastHashMap::default();
+
         for sample in samples {
-            lib_mappings_hierarchy.process_ops(sample.timestamp_mono);
+            // Process pending library mapping operations; clear caches if mappings changed
+            if lib_mappings_hierarchy.process_ops(sample.timestamp_mono) {
+                stack_caches.clear();
+            }
+
             let UnresolvedSampleOrMarker {
                 thread_handle,
                 timestamp,
@@ -103,8 +112,47 @@ impl ProcessSampleData {
             );
             let mut frames =
                 StackDepthLimitingFrameIter::new(profile, frames, thread_handle, user_category);
+
+            // Build stack with caching
+            let cache = stack_caches
+                .entry(thread_handle)
+                .or_insert_with(StackCache::default);
+            let mut parent_stack_index: Option<usize> = None;
+
+            while let Some(converted_frame) = frames.next(profile) {
+                let frame_handle = converted_frame.frame_handle;
+
+                // Try to use cache if we have address info
+                if let Some(address_info) = converted_frame.address_info {
+                    let cache_key = StackCacheKey::new(address_info, parent_stack_index);
+                    if let Some(cached_stack_index) = cache.get(&cache_key) {
+                        parent_stack_index = Some(cached_stack_index);
+                        continue;
+                    }
+
+                    // Cache miss - build stack and cache the result
+                    let stack_handle = profile.handle_for_stack(
+                        thread_handle,
+                        frame_handle,
+                        parent_stack_index.map(|i| StackHandle::from_parts(thread_handle, i)),
+                    );
+                    let new_stack_index = stack_handle.stack_index();
+                    cache.insert(cache_key, new_stack_index);
+                    parent_stack_index = Some(new_stack_index);
+                } else {
+                    // No address info (synthetic frame) - can't cache
+                    let stack_handle = profile.handle_for_stack(
+                        thread_handle,
+                        frame_handle,
+                        parent_stack_index.map(|i| StackHandle::from_parts(thread_handle, i)),
+                    );
+                    parent_stack_index = Some(stack_handle.stack_index());
+                }
+            }
+
             let stack_handle =
-                profile.handle_for_stack_frames(thread_handle, move |p| frames.next(p));
+                parent_stack_index.map(|i| StackHandle::from_parts(thread_handle, i));
+
             match sample_or_marker {
                 SampleOrMarker::Sample(SampleData { cpu_delta, weight }) => {
                     profile.add_sample(thread_handle, timestamp, stack_handle, cpu_delta, weight);
