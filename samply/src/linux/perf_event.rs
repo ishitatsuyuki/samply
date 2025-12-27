@@ -86,6 +86,7 @@ pub struct Perf {
     fd: RawFd,
     position: u64,
     parse_info: RecordParseInfo,
+    event_source: EventSource,
 }
 
 impl Drop for Perf {
@@ -148,6 +149,9 @@ fn next_raw_event(
 pub enum EventSource {
     HwCpuCycles,
     SwCpuClock,
+    /// A tracepoint event, identified by its tracepoint ID.
+    /// The tracepoint ID can be read from /sys/kernel/debug/tracing/events/<category>/<name>/id
+    Tracepoint(u64),
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +159,8 @@ pub struct PerfBuilder {
     pid: u32,
     cpu: Option<u32>,
     frequency: u64,
+    /// If true, use frequency-based sampling. If false, use period-based (every N events).
+    use_frequency: bool,
     stack_size: u32,
     reg_mask: u64,
     event_source: EventSource,
@@ -183,6 +189,14 @@ impl PerfBuilder {
 
     pub fn frequency(mut self, frequency: u64) -> Self {
         self.frequency = frequency;
+        self.use_frequency = true;
+        self
+    }
+
+    /// Set the sample period (every N events). This is used for tracepoint events.
+    pub fn period(mut self, period: u64) -> Self {
+        self.frequency = period; // reuse the field for period
+        self.use_frequency = false;
         self
     }
 
@@ -230,7 +244,8 @@ impl PerfBuilder {
     pub fn open(self) -> io::Result<Perf> {
         let pid = self.pid;
         let cpu = self.cpu.map(|cpu| cpu as i32).unwrap_or(-1);
-        let frequency = self.frequency;
+        let sample_period_or_freq = self.frequency;
+        let use_frequency = self.use_frequency;
         let stack_size = self.stack_size;
         let reg_mask = self.reg_mask;
         let event_source = self.event_source;
@@ -251,12 +266,14 @@ impl PerfBuilder {
         //     start_disabled
         // );
 
-        let max_sample_rate = Perf::max_sample_rate();
-        if let Some(max_sample_rate) = max_sample_rate {
-            // debug!("Maximum sample rate: {}", max_sample_rate);
-            if frequency > max_sample_rate {
-                let message = format!( "frequency can be at most {max_sample_rate} as configured in /proc/sys/kernel/perf_event_max_sample_rate" );
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, message));
+        if use_frequency {
+            let max_sample_rate = Perf::max_sample_rate();
+            if let Some(max_sample_rate) = max_sample_rate {
+                // debug!("Maximum sample rate: {}", max_sample_rate);
+                if sample_period_or_freq > max_sample_rate {
+                    let message = format!( "frequency can be at most {max_sample_rate} as configured in /proc/sys/kernel/perf_event_max_sample_rate" );
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, message));
+                }
             }
         }
 
@@ -295,6 +312,10 @@ impl PerfBuilder {
                 attr.kind = PERF_TYPE_SOFTWARE;
                 attr.config = PERF_COUNT_SW_CPU_CLOCK;
             }
+            EventSource::Tracepoint(tracepoint_id) => {
+                attr.kind = PERF_TYPE_TRACEPOINT;
+                attr.config = tracepoint_id;
+            }
         }
 
         attr.sample_type = PERF_SAMPLE_IP
@@ -313,7 +334,7 @@ impl PerfBuilder {
 
         attr.sample_regs_user = reg_mask;
         attr.sample_stack_user = stack_size;
-        attr.sample_period_or_freq = frequency;
+        attr.sample_period_or_freq = sample_period_or_freq;
         attr.clock_id = libc::CLOCK_MONOTONIC;
 
         attr.flags = PERF_ATTR_FLAG_DISABLED
@@ -321,10 +342,13 @@ impl PerfBuilder {
             | PERF_ATTR_FLAG_MMAP2
             | PERF_ATTR_FLAG_MMAP_DATA
             | PERF_ATTR_FLAG_COMM
-            | PERF_ATTR_FLAG_FREQ
             | PERF_ATTR_FLAG_TASK
             | PERF_ATTR_FLAG_SAMPLE_ID_ALL
             | PERF_ATTR_FLAG_USE_CLOCKID;
+
+        if use_frequency {
+            attr.flags |= PERF_ATTR_FLAG_FREQ;
+        }
 
         if self.enable_on_exec {
             attr.flags |= PERF_ATTR_FLAG_ENABLE_ON_EXEC;
@@ -409,6 +433,7 @@ impl PerfBuilder {
             fd,
             position: 0,
             parse_info,
+            event_source,
         };
 
         if !start_disabled {
@@ -417,6 +442,27 @@ impl PerfBuilder {
 
         Ok(perf)
     }
+}
+
+/// Read the tracepoint ID for the sched:sched_switch event.
+/// This requires access to the tracefs filesystem, which is typically mounted at
+/// /sys/kernel/debug/tracing or /sys/kernel/tracing.
+/// Reading this file usually requires root or appropriate capabilities.
+pub fn sched_switch_tracepoint_id() -> Option<u64> {
+    // Try different possible paths for tracefs
+    let paths = [
+        "/sys/kernel/tracing/events/sched/sched_switch/id",
+        "/sys/kernel/debug/tracing/events/sched/sched_switch/id",
+    ];
+
+    for path in paths {
+        if let Ok(data) = std::fs::read_to_string(path) {
+            if let Ok(id) = data.trim().parse::<u64>() {
+                return Some(id);
+            }
+        }
+    }
+    None
 }
 
 impl Perf {
@@ -430,6 +476,7 @@ impl Perf {
             pid: 0,
             cpu: None,
             frequency: 0,
+            use_frequency: true,
             stack_size: 0,
             reg_mask: 0,
             event_source: EventSource::SwCpuClock,
@@ -456,6 +503,11 @@ impl Perf {
     #[inline]
     pub fn fd(&self) -> RawFd {
         self.fd
+    }
+
+    #[inline]
+    pub fn event_source(&self) -> EventSource {
+        self.event_source
     }
 
     #[inline]

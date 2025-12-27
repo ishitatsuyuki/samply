@@ -10,7 +10,7 @@ use linux_perf_data::linux_perf_event_reader::get_record_timestamp;
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 
-use super::perf_event::{EventRef, EventSource, Perf};
+use super::perf_event::{sched_switch_tracepoint_id, EventRef, EventSource, Perf};
 use super::sorter::EventSorter;
 
 struct StoppedProcess(u32);
@@ -64,7 +64,7 @@ impl DerefMut for Member {
 }
 
 pub struct PerfGroup {
-    event_sorter: EventSorter<RawFd, u64, EventRef>,
+    event_sorter: EventSorter<RawFd, u64, (EventRef, EventSource)>,
     members: BTreeMap<RawFd, Member>,
     poll: Poll,
     poll_events: Events,
@@ -72,6 +72,9 @@ pub struct PerfGroup {
     stack_size: u32,
     regs_mask: u64,
     event_source: EventSource,
+    /// The tracepoint ID for sched:sched_switch, if available.
+    /// This is None if we couldn't read the tracepoint ID (e.g., not root).
+    sched_switch_tracepoint_id: Option<u64>,
     stopped_processes: Vec<StoppedProcess>,
 }
 
@@ -99,6 +102,11 @@ pub enum AttachMode {
 
 impl PerfGroup {
     pub fn new(frequency: u32, stack_size: u32, regs_mask: u64, event_source: EventSource) -> Self {
+        // Try to read the sched_switch tracepoint ID. This requires access to tracefs,
+        // which typically requires root privileges. If we can't read it, we'll fall back
+        // to using context switches only.
+        let sched_switch_id = sched_switch_tracepoint_id();
+
         PerfGroup {
             event_sorter: EventSorter::new(),
             members: Default::default(),
@@ -108,8 +116,14 @@ impl PerfGroup {
             stack_size,
             event_source,
             regs_mask,
+            sched_switch_tracepoint_id: sched_switch_id,
             stopped_processes: Vec::new(),
         }
+    }
+
+    /// Returns true if sched_switch tracepoint events are being captured.
+    pub fn has_sched_switch(&self) -> bool {
+        self.sched_switch_tracepoint_id.is_some()
     }
 
     pub fn open(
@@ -197,6 +211,61 @@ impl PerfGroup {
             }
         }
 
+        // Try to open sched_switch tracepoint events if we have the tracepoint ID.
+        // This requires root or appropriate capabilities; if it fails, we fall back
+        // to using context switches only for off-CPU profiling.
+        if let Some(tracepoint_id) = self.sched_switch_tracepoint_id {
+            let sched_switch_source = EventSource::Tracepoint(tracepoint_id);
+
+            // Open sched_switch tracepoint events for the main process on each CPU.
+            for cpu in 0..cpu_count as u32 {
+                let mut builder = Perf::build()
+                    .pid(pid)
+                    .only_cpu(cpu as _)
+                    .period(1) // Sample on every sched_switch
+                    .sample_user_stack(self.stack_size)
+                    .sample_user_regs(self.regs_mask)
+                    .event_source(sched_switch_source)
+                    .inherit_to_children()
+                    .start_disabled();
+
+                if attach_mode == AttachMode::AttachWithEnableOnExec {
+                    builder = builder.enable_on_exec();
+                }
+
+                // Try to open the tracepoint event. If it fails (e.g., permission denied),
+                // we just skip it - the profiler will fall back to context switches.
+                if let Ok(perf) = builder.open() {
+                    perf_events.push((Some(cpu), perf));
+                }
+            }
+
+            // Also open for existing threads if not using inherit mode (many threads case)
+            if cpu_count * (threads.len() + 1) < 1000 {
+                for cpu in 0..cpu_count as u32 {
+                    for &tid in &threads {
+                        let mut builder = Perf::build()
+                            .pid(tid)
+                            .only_cpu(cpu as _)
+                            .period(1)
+                            .sample_user_stack(self.stack_size)
+                            .sample_user_regs(self.regs_mask)
+                            .event_source(sched_switch_source)
+                            .inherit_to_children()
+                            .start_disabled();
+
+                        if attach_mode == AttachMode::AttachWithEnableOnExec {
+                            builder = builder.enable_on_exec();
+                        }
+
+                        if let Ok(perf) = builder.open() {
+                            perf_events.push((Some(cpu), perf));
+                        }
+                    }
+                }
+            }
+        }
+
         for (_cpu, perf) in perf_events {
             let fd = perf.fd();
             self.members.insert(fd, Member::new(perf));
@@ -245,13 +314,13 @@ impl PerfGroup {
         }
     }
 
-    pub fn consume_events(&mut self, cb: &mut impl FnMut(EventRef)) {
+    pub fn consume_events(&mut self, cb: &mut impl FnMut(EventRef, EventSource)) {
         let mut fds_to_remove = Vec::new();
         loop {
             for (&fd, member) in &mut self.members {
                 self.event_sorter.begin_group(fd);
-                while let Some(ev) = self.event_sorter.pop() {
-                    cb(ev);
+                while let Some((ev, event_source)) = self.event_sorter.pop() {
+                    cb(ev, event_source);
                 }
 
                 let perf = &mut member.perf;
@@ -263,6 +332,7 @@ impl PerfGroup {
                     continue;
                 }
 
+                let event_source = perf.event_source();
                 self.event_sorter.extend(perf.iter().map(|event| {
                     let rec = event.get();
                     let timestamp = get_record_timestamp::<LittleEndian>(
@@ -271,13 +341,13 @@ impl PerfGroup {
                         &rec.parse_info,
                     )
                     .expect("All events should have a record identifier");
-                    (timestamp, event)
+                    (timestamp, (event, event_source))
                 }));
             }
 
             self.event_sorter.advance_round();
-            while let Some(ev) = self.event_sorter.pop() {
-                cb(ev);
+            while let Some((ev, event_source)) = self.event_sorter.pop() {
+                cb(ev, event_source);
             }
 
             for fd in fds_to_remove.drain(..) {

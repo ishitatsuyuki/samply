@@ -14,7 +14,7 @@ use linux_perf_data::linux_perf_event_reader::{
 use nix::sys::wait::WaitStatus;
 use tokio::sync::oneshot;
 
-use super::perf_event::EventSource;
+use super::perf_event::{sched_switch_tracepoint_id, EventSource};
 use super::perf_group::{AttachMode, PerfGroup};
 use super::proc_maps;
 use super::process::SuspendedLaunchedProcess;
@@ -102,7 +102,9 @@ pub fn run(
     };
     let initial_exec_name_and_cmdline = (initial_exec_name, initial_cmdline);
     let observer_thread = thread::spawn(move || {
-        let mut converter = make_converter(interval, profile_creation_props);
+        // Check if sched_switch tracepoints are available (requires root/CAP_PERFMON).
+        let has_sched_switch = sched_switch_tracepoint_id().is_some();
+        let mut converter = make_converter(interval, profile_creation_props, has_sched_switch);
 
         // Wait for the initial pid to profile.
         let SamplerRequest::StartProfilingAnotherProcess(pid, attach_mode) =
@@ -258,7 +260,9 @@ fn start_profiling_pid(
         move || {
             let interval = recording_props.interval;
             let time_limit = recording_props.time_limit;
-            let mut converter = make_converter(interval, profile_creation_props);
+            // Check if sched_switch tracepoints are available (requires root/CAP_PERFMON).
+            let has_sched_switch = sched_switch_tracepoint_id().is_some();
+            let mut converter = make_converter(interval, profile_creation_props, has_sched_switch);
             let SamplerRequest::StartProfilingAnotherProcess(pid, attach_mode) =
                 profile_another_pid_request_receiver.recv().unwrap()
             else {
@@ -319,6 +323,7 @@ fn paranoia_level() -> Option<u32> {
 fn make_converter(
     interval: Duration,
     profile_creation_props: ProfileCreationProps,
+    has_sched_switch: bool,
 ) -> Converter<framehop::UnwinderNative<MmapRangeOrVec, framehop::MayAllocateDuringUnwind>> {
     let interval_nanos = if interval.as_nanos() > 0 {
         interval.as_nanos() as u64
@@ -334,14 +339,24 @@ fn make_converter(
         Endianness::BigEndian
     };
     let machine_info = uname::uname().ok();
+
+    // Determine the off-CPU indicator based on whether sched_switch tracepoints are available.
+    // When sched_switch is available, we get stacks at switch-out time, which is better.
+    // Otherwise, we fall back to context switches which don't have stacks at switch-out.
+    let off_cpu_indicator = if has_sched_switch {
+        Some(OffCpuIndicator::SchedSwitchAndSamples)
+    } else {
+        Some(OffCpuIndicator::ContextSwitches)
+    };
+
     let interpretation = EventInterpretation {
         main_event_attr_index: 0,
         main_event_name: "cycles".to_string(),
         sampling_is_time_based: Some(interval_nanos),
-        off_cpu_indicator: Some(OffCpuIndicator::ContextSwitches),
-        sched_switch_attr_index: None,
+        off_cpu_indicator,
+        sched_switch_attr_index: if has_sched_switch { Some(1) } else { None },
         known_event_indices: HashMap::new(),
-        event_names: vec!["cycles".to_string()],
+        event_names: vec!["cycles".to_string(), "sched:sched_switch".to_string()],
     };
 
     let mut converter = Converter::<
@@ -599,7 +614,7 @@ fn run_profiler(
             break;
         }
 
-        perf.consume_events(&mut |event_ref| {
+        perf.consume_events(&mut |event_ref, event_source| {
             let record = event_ref.get();
             let parsed_record = record.parse().unwrap();
             // debug!("Recording parsed_record: {:#?}", parsed_record);
@@ -613,13 +628,19 @@ fn run_profiler(
                 last_timestamp = timestamp;
             }
 
+            // Check if this is a sched_switch tracepoint event
+            let is_sched_switch = matches!(event_source, EventSource::Tracepoint(_));
+
             match parsed_record {
                 EventRecord::Sample(e) => {
-                    converter.handle_main_event_sample::<ConvertRegsNative>(&e);
-                    /*
-                    } else if interpretation.sched_switch_attr_index == Some(attr_index) {
-                        converter.handle_sched_switch_sample::<C>(e);
-                    }*/
+                    if is_sched_switch {
+                        // This is a sched_switch tracepoint sample - use it to capture
+                        // the call stack at the moment the thread goes off-CPU.
+                        converter.handle_sched_switch_sample::<ConvertRegsNative>(&e);
+                    } else {
+                        // This is a main event sample (cpu-cycles, etc.)
+                        converter.handle_main_event_sample::<ConvertRegsNative>(&e);
+                    }
                 }
                 EventRecord::Fork(e) => {
                     converter.handle_fork(e);
